@@ -1,6 +1,10 @@
 using System.Net;
 using DotnetTun.Abstractions;
 using DotnetTun.Core;
+using DotnetTun.Core.Dns;
+using DotnetTun.Core.Routing;
+using DotnetTun.Abstractions.Routing;
+using DotnetTun.Demo.Cli;
 using DotnetTun.Outbounds.Socks5;
 using DotnetTun.Platforms.MacOS.Networking;
 
@@ -43,6 +47,17 @@ Console.WriteLine("macOS configure commands (not executed):");
 foreach (string command in commandBuilder.BuildConfigureCommands(macOptions))
 {
     Console.WriteLine($"  {command}");
+}
+
+Console.WriteLine();
+Console.WriteLine("Sample DNS log preview:");
+var logger = new ConsoleProxyLogger();
+var pool = new FakeIpPool();
+var router = new DomainInterceptRouter(options.InterceptDomains.Select(domain => new DomainInterceptRule(domain)), pool);
+var resolver = new FakeDnsResolver(router, logger);
+foreach (string domain in options.InterceptDomains.Where(domain => !domain.StartsWith("*.", StringComparison.Ordinal)))
+{
+    _ = resolver.TryResolve(CreatePreviewAQuery(0xD07A, domain), out _);
 }
 
 if (options.ExcludedIps.Count > 0)
@@ -131,4 +146,22 @@ static Socks5OutboundOptions ParseSocks5(string endpoint)
     }
 
     return new Socks5OutboundOptions(parts[0], port);
+}
+
+static byte[] CreatePreviewAQuery(ushort transactionId, string domain)
+{
+    using var stream = new MemoryStream();
+    stream.WriteByte((byte)(transactionId >> 8));
+    stream.WriteByte((byte)(transactionId & 0xFF));
+    stream.Write([0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+    foreach (string label in domain.Split('.'))
+    {
+        stream.WriteByte((byte)label.Length);
+        stream.Write(System.Text.Encoding.ASCII.GetBytes(label));
+    }
+
+    stream.WriteByte(0x00);
+    stream.Write([0x00, 0x01, 0x00, 0x01]);
+    return stream.ToArray();
 }
