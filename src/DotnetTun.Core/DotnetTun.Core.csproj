@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>DotnetTun.Core</PackageId>
+    <Description>Core fake-IP, routing, and session primitives for DotnetTun.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../DotnetTun.Abstractions/DotnetTun.Abstractions.csproj" />
+  </ItemGroup>
+</Project>
