@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DotnetTun.Abstractions/DotnetTun.Abstractions.csproj" />
+    <Project Path="src/DotnetTun.Core/DotnetTun.Core.csproj" />
+    <Project Path="src/DotnetTun.Platforms.MacOS/DotnetTun.Platforms.MacOS.csproj" />
+    <Project Path="src/DotnetTun.Outbounds.Socks5/DotnetTun.Outbounds.Socks5.csproj" />
+    <Project Path="src/DotnetTun.Hosting/DotnetTun.Hosting.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/DotnetTun.Demo.Cli/DotnetTun.Demo.Cli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DotnetTun.Core.Tests/DotnetTun.Core.Tests.csproj" />
+    <Project Path="tests/DotnetTun.Platforms.MacOS.Tests/DotnetTun.Platforms.MacOS.Tests.csproj" />
+    <Project Path="tests/DotnetTun.Hosting.Tests/DotnetTun.Hosting.Tests.csproj" />
+  </Folder>
+</Solution>
