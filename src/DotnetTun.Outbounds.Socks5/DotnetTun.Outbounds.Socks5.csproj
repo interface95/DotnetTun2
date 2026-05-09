@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>DotnetTun.Outbounds.Socks5</PackageId>
+    <Description>SOCKS5 outbound adapter for DotnetTun.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../DotnetTun.Abstractions/DotnetTun.Abstractions.csproj" />
+  </ItemGroup>
+</Project>
