@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>DotnetTun.Abstractions</PackageId>
+    <Description>Abstractions for DotnetTun transparent proxy components.</Description>
+  </PropertyGroup>
+</Project>
