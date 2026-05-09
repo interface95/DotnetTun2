@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/DotnetTun.Core/DotnetTun.Core.csproj" />
+    <ProjectReference Include="../../src/DotnetTun.Outbounds.Socks5/DotnetTun.Outbounds.Socks5.csproj" />
+  </ItemGroup>
+</Project>
