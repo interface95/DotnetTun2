@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>DotnetTun.Platforms.MacOS</PackageId>
+    <Description>macOS utun and network configuration boundaries for DotnetTun.</Description>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../DotnetTun.Abstractions/DotnetTun.Abstractions.csproj" />
+  </ItemGroup>
+</Project>
