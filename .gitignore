@@ -1,0 +1,12 @@
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+.DS_Store
+TestResults/
+*.user
+*.suo
+
+# Reference upstream project kept locally for analysis; not part of DotnetTun2 package source.
+linker/
