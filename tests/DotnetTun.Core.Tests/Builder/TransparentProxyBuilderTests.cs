@@ -32,5 +32,9 @@ public sealed class TransparentProxyBuilderTests
         Assert.Same(outbound, Assert.Single(proxy.Outbounds).Value);
     }
 
-    private sealed record TestOutbound(string Endpoint) : IOutbound;
+    private sealed record TestOutbound(string Endpoint) : IOutbound
+    {
+        public ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Test outbound is configuration-only.");
+    }
 }

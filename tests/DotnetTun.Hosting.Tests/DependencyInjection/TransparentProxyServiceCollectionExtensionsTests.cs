@@ -42,5 +42,8 @@ public sealed class TransparentProxyServiceCollectionExtensionsTests
     private sealed class TestOutbound : IOutbound
     {
         public string Endpoint { get; set; } = string.Empty;
+
+        public ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Test outbound is configuration-only.");
     }
 }
