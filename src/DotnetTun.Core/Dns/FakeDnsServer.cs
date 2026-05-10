@@ -72,11 +72,11 @@ public sealed class FakeDnsServer(FakeDnsResolver resolver, IPAddress listenAddr
             {
                 result = await udpClient.ReceiveAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 break;
             }
-            catch (ObjectDisposedException)
+            catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
             {
                 break;
             }
