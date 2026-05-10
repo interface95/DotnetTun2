@@ -85,7 +85,8 @@ public sealed class FakeDnsServer(FakeDnsResolver resolver, IPAddress listenAddr
                 break;
             }
 
-            if (resolver.TryResolve(result.Buffer, out byte[]? response))
+            byte[]? response = await resolver.ResolveAsync(result.Buffer, cancellationToken).ConfigureAwait(false);
+            if (response is not null)
             {
                 await udpClient.SendAsync(response, result.RemoteEndPoint, cancellationToken).ConfigureAwait(false);
             }

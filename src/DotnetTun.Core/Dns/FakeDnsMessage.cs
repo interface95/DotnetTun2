@@ -97,4 +97,23 @@ public static class FakeDnsMessage
 
         return response;
     }
+
+    public static byte[] CreateNoDataResponse(DnsQuestion question)
+    {
+        byte[] response = new byte[HeaderLength + question.OriginalQuestion.Length];
+        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(0, 2), question.TransactionId);
+        response[2] = 0x81;
+        response[3] = 0x80;
+        response[4] = 0x00;
+        response[5] = 0x01;
+        response[6] = 0x00;
+        response[7] = 0x00;
+        response[8] = 0x00;
+        response[9] = 0x00;
+        response[10] = 0x00;
+        response[11] = 0x00;
+
+        question.OriginalQuestion.CopyTo(response.AsSpan(HeaderLength));
+        return response;
+    }
 }

@@ -41,11 +41,39 @@ public sealed class FakeDnsMessageTests
         Assert.Equal(0x01, response[7]);
         Assert.Equal([198, 18, 0, 1], response[^4..]);
     }
+
+    [Fact]
+    public void CreateNoDataResponse_WithAaaaQuestion_ReturnsNoErrorWithZeroAnswers()
+    {
+        // Arrange
+        byte[] query = DnsTestPackets.CreateAaaaQuery(0x5678, "api.anthropic.com");
+        Assert.True(FakeDnsMessage.TryReadQuestion(query, out DnsQuestion question));
+
+        // Act
+        byte[] response = FakeDnsMessage.CreateNoDataResponse(question);
+
+        // Assert
+        Assert.Equal(0x56, response[0]);
+        Assert.Equal(0x78, response[1]);
+        Assert.Equal(0x81, response[2]);
+        Assert.Equal(0x80, response[3]);
+        Assert.Equal(0x00, response[4]);
+        Assert.Equal(0x01, response[5]);
+        Assert.Equal(0x00, response[6]);
+        Assert.Equal(0x00, response[7]);
+        Assert.Equal(query[12..], response[12..]);
+    }
 }
 
 internal static class DnsTestPackets
 {
     public static byte[] CreateAQuery(ushort transactionId, string domain)
+        => CreateQuery(transactionId, domain, DnsRecordType.A);
+
+    public static byte[] CreateAaaaQuery(ushort transactionId, string domain)
+        => CreateQuery(transactionId, domain, DnsRecordType.Aaaa);
+
+    private static byte[] CreateQuery(ushort transactionId, string domain, DnsRecordType recordType)
     {
         using var stream = new MemoryStream();
         stream.WriteByte((byte)(transactionId >> 8));
@@ -59,7 +87,9 @@ internal static class DnsTestPackets
         }
 
         stream.WriteByte(0x00);
-        stream.Write([0x00, 0x01, 0x00, 0x01]);
+        stream.WriteByte(0x00);
+        stream.WriteByte((byte)recordType);
+        stream.Write([0x00, 0x01]);
         return stream.ToArray();
     }
 }
