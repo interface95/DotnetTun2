@@ -14,11 +14,15 @@ public sealed class MacRouteCommandBuilderTests
         var builder = new MacRouteCommandBuilder();
 
         // Act
-        string[] commands = builder.BuildConfigureCommands(options);
+        MacCommand[] commands = builder.BuildConfigureCommands(options);
 
         // Assert
-        Assert.Contains("sudo ifconfig utun9 10.88.0.2 10.88.0.1 netmask 255.255.255.255 up", commands);
-        Assert.Contains("sudo ifconfig utun9 mtu 1420", commands);
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.Arguments.SequenceEqual(["ifconfig", "utun9", "10.88.0.2", "10.88.0.1", "netmask", "255.255.255.255", "up"]));
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.Arguments.SequenceEqual(["ifconfig", "utun9", "mtu", "1420"]));
     }
 
     [Fact]
@@ -29,10 +33,12 @@ public sealed class MacRouteCommandBuilderTests
         var builder = new MacRouteCommandBuilder();
 
         // Act
-        string[] commands = builder.BuildConfigureCommands(options);
+        MacCommand[] commands = builder.BuildConfigureCommands(options);
 
         // Assert
-        Assert.Contains("sudo route add -net 198.18.0.0/15 -interface utun9", commands);
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.Arguments.SequenceEqual(["route", "add", "-net", "198.18.0.0/15", "-interface", "utun9"]));
     }
 
     [Fact]
@@ -43,11 +49,41 @@ public sealed class MacRouteCommandBuilderTests
         var builder = new MacRouteCommandBuilder();
 
         // Act
-        string[] commands = builder.BuildExcludeCommands(options, IPAddress.Parse("192.168.1.1"));
+        MacCommand[] commands = builder.BuildExcludeCommands(options, IPAddress.Parse("192.168.1.1"));
 
         // Assert
-        Assert.Contains("sudo route add -host 1.1.1.1 192.168.1.1", commands);
-        Assert.Contains("sudo route add -host 203.0.113.10 192.168.1.1", commands);
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.Arguments.SequenceEqual(["route", "add", "-host", "1.1.1.1", "192.168.1.1"]));
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.Arguments.SequenceEqual(["route", "add", "-host", "203.0.113.10", "192.168.1.1"]));
+    }
+
+    [Fact]
+    public void BuildCleanupCommands_RemovesFakeIpAndTunHostRoutes()
+    {
+        // Arrange
+        var options = CreateOptions();
+        var builder = new MacRouteCommandBuilder();
+
+        // Act
+        MacCommand[] commands = builder.BuildCleanupCommands(options);
+
+        // Assert
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.IgnoreFailure
+            && command.Arguments.SequenceEqual(["route", "delete", "-net", "198.18.0.0/15"]));
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.IgnoreFailure
+            && command.Arguments.SequenceEqual(["route", "delete", "-host", "10.88.0.2"]));
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.IgnoreFailure
+            && command.Arguments.SequenceEqual(["route", "delete", "-host", "10.88.0.1"]));
+        Assert.All(commands, command => Assert.DoesNotContain("2>/dev/null || true", command.ToString(), StringComparison.Ordinal));
     }
 
     private static MacTunOptions CreateOptions()
