@@ -24,6 +24,28 @@ public sealed class MacTunConfiguratorTests
     }
 
     [Fact]
+    public async Task ConfigureAsync_WhenDefaultGatewayIsKnown_RunsExcludeCommandsAfterConfigureCommands()
+    {
+        // Arrange
+        var runner = new RecordingCommandRunner();
+        var configurator = new MacTunConfigurator(new MacRouteCommandBuilder(), runner);
+        var options = CreateOptions(
+            ExcludedIps: [IPAddress.Parse("203.0.113.10")],
+            DefaultGateway: IPAddress.Parse("192.168.1.1"));
+        MacCommand[] expectedCommands =
+        [
+            .. new MacRouteCommandBuilder().BuildConfigureCommands(options),
+            .. new MacRouteCommandBuilder().BuildExcludeCommands(options, IPAddress.Parse("192.168.1.1"))
+        ];
+
+        // Act
+        await configurator.ConfigureAsync(options, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(expectedCommands, runner.Commands);
+    }
+
+    [Fact]
     public async Task CleanupAsync_RunsCleanupCommandsInOrder()
     {
         // Arrange
@@ -38,6 +60,26 @@ public sealed class MacTunConfiguratorTests
         Assert.Equal(
             new MacRouteCommandBuilder().BuildCleanupCommands(options),
             runner.Commands);
+    }
+
+    [Fact]
+    public async Task CleanupAsync_WhenExcludedIpsExist_RemovesExcludedHostRoutesBeforeTunRoutes()
+    {
+        // Arrange
+        var runner = new RecordingCommandRunner();
+        var configurator = new MacTunConfigurator(new MacRouteCommandBuilder(), runner);
+        var options = CreateOptions(ExcludedIps: [IPAddress.Parse("203.0.113.10")]);
+        MacCommand[] expectedCommands =
+        [
+            .. new MacRouteCommandBuilder().BuildExcludeCleanupCommands(options),
+            .. new MacRouteCommandBuilder().BuildCleanupCommands(options)
+        ];
+
+        // Act
+        await configurator.CleanupAsync(options, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(expectedCommands, runner.Commands);
     }
 
     [Fact]
@@ -102,14 +144,15 @@ public sealed class MacTunConfiguratorTests
         Assert.Equal(3, runner.Commands.Count);
     }
 
-    private static MacTunOptions CreateOptions()
+    private static MacTunOptions CreateOptions(IReadOnlyList<IPAddress>? ExcludedIps = null, IPAddress? DefaultGateway = null)
         => new(
             InterfaceName: "utun9",
             Address: IPAddress.Parse("10.88.0.2"),
             Gateway: IPAddress.Parse("10.88.0.1"),
             Mtu: 1420,
             FakeIpCidr: "198.18.0.0/15",
-            ExcludedIps: []);
+            ExcludedIps: ExcludedIps ?? [],
+            DefaultGateway: DefaultGateway);
 
     private sealed class RecordingCommandRunner : IMacCommandRunner
     {

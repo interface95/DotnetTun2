@@ -20,15 +20,26 @@ public sealed class TunDemoRuntime
     private readonly Func<ITunDevice> _createTunDevice;
     private readonly Func<MacTunConfigurator> _createConfigurator;
     private readonly Func<ITunDevice, FakeIpPool, IOutbound, int, TimeSpan?, ITunDemoRawTunProxy> _createRawTunProxy;
+    private readonly Func<CancellationToken, ValueTask<IPAddress?>> _getDefaultGatewayAsync;
 
     public TunDemoRuntime(
         Func<ITunDevice> CreateTunDevice,
         Func<MacTunConfigurator> CreateConfigurator,
         Func<ITunDevice, FakeIpPool, IOutbound, int, TimeSpan?, ITunDemoRawTunProxy> CreateRawTunProxy)
+        : this(CreateTunDevice, CreateConfigurator, CreateRawTunProxy, GetDefaultGatewayAsync: null)
+    {
+    }
+
+    public TunDemoRuntime(
+        Func<ITunDevice> CreateTunDevice,
+        Func<MacTunConfigurator> CreateConfigurator,
+        Func<ITunDevice, FakeIpPool, IOutbound, int, TimeSpan?, ITunDemoRawTunProxy> CreateRawTunProxy,
+        Func<CancellationToken, ValueTask<IPAddress?>>? GetDefaultGatewayAsync = null)
     {
         _createTunDevice = CreateTunDevice ?? throw new ArgumentNullException(nameof(CreateTunDevice));
         _createConfigurator = CreateConfigurator ?? throw new ArgumentNullException(nameof(CreateConfigurator));
         _createRawTunProxy = CreateRawTunProxy ?? throw new ArgumentNullException(nameof(CreateRawTunProxy));
+        _getDefaultGatewayAsync = GetDefaultGatewayAsync ?? (cancellationToken => new MacDefaultGatewayResolver().GetDefaultGatewayAsync(cancellationToken));
     }
 
     public static TunDemoRuntime Default { get; } = new(
@@ -49,6 +60,9 @@ public sealed class TunDemoRuntime
 
     public ITunDemoRawTunProxy CreateRawTunProxy(ITunDevice tunDevice, FakeIpPool pool, IOutbound outbound, int mtu, TimeSpan? responseReadTimeout)
         => _createRawTunProxy.Invoke(tunDevice, pool, outbound, mtu, responseReadTimeout);
+
+    public ValueTask<IPAddress?> GetDefaultGatewayAsync(CancellationToken cancellationToken = default)
+        => _getDefaultGatewayAsync.Invoke(cancellationToken);
 
     private sealed class RawTunProxyAdapter(RawTunProxy proxy) : ITunDemoRawTunProxy
     {
@@ -437,7 +451,8 @@ public abstract class DotnetTunDemoCommand
                 Console.WriteLine("Opening macOS utun and running raw TCP packet pump. Press Ctrl+C to stop.");
                 var pool = new FakeIpPool(fakeIp, fakeIp);
                 _ = pool.Allocate(domain);
-                var outbound = new Socks5Outbound(ParseSocks5(socks5Endpoint));
+                Socks5OutboundOptions socks5Options = ParseSocks5(socks5Endpoint);
+                var outbound = new Socks5Outbound(socks5Options);
                 tunDevice = runtime.CreateTunDevice();
                 configurator = runtime.CreateConfigurator();
 
@@ -448,7 +463,11 @@ public abstract class DotnetTunDemoCommand
                 }
 
                 openedFileDescriptor = openResult.FileDescriptor;
-                macOptions = CreateMacOptions(openResult.InterfaceName);
+                IPAddress? defaultGateway = await runtime.GetDefaultGatewayAsync(stopSource.Token).ConfigureAwait(false);
+                macOptions = CreateMacOptions(
+                    openResult.InterfaceName,
+                    ResolveExcludedServerIps(socks5Options.Host),
+                    defaultGateway);
                 await configurator.ConfigureAsync(macOptions, stopSource.Token).ConfigureAwait(false);
                 await using ITunDemoRawTunProxy proxy = runtime.CreateRawTunProxy(
                     tunDevice,
@@ -516,7 +535,7 @@ public abstract class DotnetTunDemoCommand
             }
         }
 
-        private MacTunOptions CreateMacOptions(string interfaceName)
+        private MacTunOptions CreateMacOptions(string interfaceName, IReadOnlyList<IPAddress>? excludedIps = null, IPAddress? defaultGateway = null)
         {
             string fakeIpCidr = fakeIp.ToString() + "/32";
             return new MacTunOptions(
@@ -525,7 +544,18 @@ public abstract class DotnetTunDemoCommand
                 Gateway: IPAddress.Parse("10.88.0.1"),
                 Mtu: mtu,
                 FakeIpCidr: fakeIpCidr,
-                ExcludedIps: []);
+                ExcludedIps: excludedIps ?? [],
+                DefaultGateway: defaultGateway);
+        }
+
+        private static IReadOnlyList<IPAddress> ResolveExcludedServerIps(string host)
+        {
+            if (!IPAddress.TryParse(host, out IPAddress? address) || IPAddress.IsLoopback(address))
+            {
+                return [];
+            }
+
+            return [address];
         }
     }
 

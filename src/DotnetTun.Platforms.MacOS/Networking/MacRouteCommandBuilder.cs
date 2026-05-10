@@ -20,6 +20,9 @@ public sealed class MacRouteCommandBuilder
     public MacCommand[] BuildExcludeCommands(MacTunOptions options, IPAddress defaultGateway)
         => [.. options.ExcludedIps.Select(ip => new MacCommand("sudo", ["route", "add", "-host", ip.ToString(), defaultGateway.ToString()]))];
 
+    public MacCommand[] BuildExcludeCleanupCommands(MacTunOptions options)
+        => [.. options.ExcludedIps.Select(ip => new MacCommand("sudo", ["route", "delete", "-host", ip.ToString()], IgnoreFailure: true))];
+
     public MacCommand[] BuildCleanupCommands(MacTunOptions options)
         =>
         [

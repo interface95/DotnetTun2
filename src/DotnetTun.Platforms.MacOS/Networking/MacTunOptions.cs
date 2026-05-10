@@ -5,6 +5,18 @@ namespace DotnetTun.Platforms.MacOS.Networking;
 public sealed record MacTunOptions
 {
     public MacTunOptions(string InterfaceName, IPAddress Address, IPAddress Gateway, int Mtu, string FakeIpCidr, IReadOnlyList<IPAddress> ExcludedIps)
+        : this(InterfaceName, Address, Gateway, Mtu, FakeIpCidr, ExcludedIps, DefaultGateway: null)
+    {
+    }
+
+    public MacTunOptions(
+        string InterfaceName,
+        IPAddress Address,
+        IPAddress Gateway,
+        int Mtu,
+        string FakeIpCidr,
+        IReadOnlyList<IPAddress> ExcludedIps,
+        IPAddress? DefaultGateway = null)
     {
         if (string.IsNullOrWhiteSpace(InterfaceName))
         {
@@ -26,6 +38,7 @@ public sealed record MacTunOptions
         this.Mtu = Mtu;
         this.FakeIpCidr = fakeIpCidr;
         this.ExcludedIps = ExcludedIps;
+        this.DefaultGateway = DefaultGateway;
     }
 
     public string InterfaceName { get; }
@@ -39,6 +52,8 @@ public sealed record MacTunOptions
     public string FakeIpCidr { get; }
 
     public IReadOnlyList<IPAddress> ExcludedIps { get; }
+
+    public IPAddress? DefaultGateway { get; }
 
     private static string ValidateInterfaceName(string interfaceName)
     {

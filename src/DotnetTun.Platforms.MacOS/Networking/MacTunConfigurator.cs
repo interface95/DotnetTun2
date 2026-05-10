@@ -13,11 +13,24 @@ public sealed class MacTunConfigurator(MacRouteCommandBuilder commandBuilder, IM
         {
             await _commandRunner.RunAsync(command, cancellationToken).ConfigureAwait(false);
         }
+
+        if (options.DefaultGateway is not null)
+        {
+            foreach (MacCommand command in _commandBuilder.BuildExcludeCommands(options, options.DefaultGateway))
+            {
+                await _commandRunner.RunAsync(command, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     public async ValueTask CleanupAsync(MacTunOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
+
+        foreach (MacCommand command in _commandBuilder.BuildExcludeCleanupCommands(options))
+        {
+            await _commandRunner.RunAsync(command, cancellationToken).ConfigureAwait(false);
+        }
 
         foreach (MacCommand command in _commandBuilder.BuildCleanupCommands(options))
         {

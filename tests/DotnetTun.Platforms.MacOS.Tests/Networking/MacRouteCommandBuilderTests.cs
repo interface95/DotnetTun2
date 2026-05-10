@@ -86,6 +86,28 @@ public sealed class MacRouteCommandBuilderTests
         Assert.All(commands, command => Assert.DoesNotContain("2>/dev/null || true", command.ToString(), StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void BuildExcludeCleanupCommands_RemovesExcludedHostRoutesWithIgnoreFailure()
+    {
+        // Arrange
+        var options = CreateOptions();
+        var builder = new MacRouteCommandBuilder();
+
+        // Act
+        MacCommand[] commands = builder.BuildExcludeCleanupCommands(options);
+
+        // Assert
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.IgnoreFailure
+            && command.Arguments.SequenceEqual(["route", "delete", "-host", "1.1.1.1"]));
+        Assert.Contains(commands, command =>
+            command.Executable == "sudo"
+            && command.IgnoreFailure
+            && command.Arguments.SequenceEqual(["route", "delete", "-host", "203.0.113.10"]));
+        Assert.All(commands, command => Assert.DoesNotContain("2>/dev/null || true", command.ToString(), StringComparison.Ordinal));
+    }
+
     private static MacTunOptions CreateOptions()
         => new(
             InterfaceName: "utun9",

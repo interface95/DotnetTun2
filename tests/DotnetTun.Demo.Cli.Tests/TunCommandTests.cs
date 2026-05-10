@@ -1,3 +1,4 @@
+using System.Net;
 using DotnetTun.Abstractions;
 using DotnetTun.Demo.Cli;
 using DotnetTun.Platforms.MacOS.Networking;
@@ -86,6 +87,67 @@ public sealed class TunCommandTests
         Assert.True(firstCleanupIndex < closeIndex);
         Assert.Contains("utun9", operations[firstConfigureIndex], StringComparison.Ordinal);
         Assert.DoesNotContain(operations, operation => operation.Contains("utun-auto", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RunAsync_WithRemoteSocks5Server_AddsAndCleansExcludeRouteThroughDefaultGateway()
+    {
+        // Arrange
+        var operations = new List<string>();
+        var device = new RecordingTunDevice(operations, interfaceName: "utun9");
+        var commandRunner = new RecordingMacCommandRunner(operations);
+        var proxy = new RecordingTunProxy(operations);
+        var runtime = new TunDemoRuntime(
+            CreateTunDevice: () => device,
+            CreateConfigurator: () => new MacTunConfigurator(new MacRouteCommandBuilder(), commandRunner),
+            CreateRawTunProxy: (_, _, _, _, _) => proxy,
+            GetDefaultGatewayAsync: _ => ValueTask.FromResult<IPAddress?>(IPAddress.Parse("192.168.1.1")));
+        DotnetTunDemoCommand command = DotnetTunDemoCommand.Parse(
+            [
+                "tun",
+                "--fake-ip", "198.18.0.1",
+                "--domain", "api.anthropic.com",
+                "--socks5", "203.0.113.10:7890"
+            ],
+            runtime);
+
+        // Act
+        int exitCode = await command.RunAsync(TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(0, exitCode);
+        Assert.Contains("command:sudo route add -host 203.0.113.10 192.168.1.1", operations);
+        Assert.Contains("command:sudo route delete -host 203.0.113.10", operations);
+    }
+
+    [Fact]
+    public async Task RunAsync_WithLoopbackSocks5Server_DoesNotAddExcludeRoute()
+    {
+        // Arrange
+        var operations = new List<string>();
+        var device = new RecordingTunDevice(operations, interfaceName: "utun9");
+        var commandRunner = new RecordingMacCommandRunner(operations);
+        var proxy = new RecordingTunProxy(operations);
+        var runtime = new TunDemoRuntime(
+            CreateTunDevice: () => device,
+            CreateConfigurator: () => new MacTunConfigurator(new MacRouteCommandBuilder(), commandRunner),
+            CreateRawTunProxy: (_, _, _, _, _) => proxy,
+            GetDefaultGatewayAsync: _ => ValueTask.FromResult<IPAddress?>(IPAddress.Parse("192.168.1.1")));
+        DotnetTunDemoCommand command = DotnetTunDemoCommand.Parse(
+            [
+                "tun",
+                "--fake-ip", "198.18.0.1",
+                "--domain", "api.anthropic.com",
+                "--socks5", "127.0.0.1:7890"
+            ],
+            runtime);
+
+        // Act
+        int exitCode = await command.RunAsync(TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(0, exitCode);
+        Assert.DoesNotContain("command:sudo route add -host 127.0.0.1 192.168.1.1", operations);
     }
 
     [Fact]
