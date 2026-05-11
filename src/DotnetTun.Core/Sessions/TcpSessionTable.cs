@@ -1,11 +1,9 @@
-using System.Collections.Concurrent;
-
 namespace DotnetTun.Core.Sessions;
 
 public sealed class TcpSessionTable
 {
-    private readonly ConcurrentDictionary<TcpFlowKey, TcpSession> _sessions = new();
-    private readonly object _capacityLock = new();
+    private readonly Dictionary<TcpFlowKey, TcpSession> _sessions = [];
+    private readonly object _gate = new();
     private readonly int _maxSessions;
 
     public TcpSessionTable(int maxSessions = 1024)
@@ -18,13 +16,22 @@ public sealed class TcpSessionTable
         _maxSessions = maxSessions;
     }
 
-    public int Count => _sessions.Count;
+    public int Count
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _sessions.Count;
+            }
+        }
+    }
 
     public TcpSession GetOrAddSynReceived(TcpFlowKey key, uint clientInitialSequence, uint serverInitialSequence)
     {
         if (TryGetOrAddSynReceived(key, clientInitialSequence, serverInitialSequence, out var session) && session is not null)
         {
-            return session;
+            return session.Value;
         }
 
         throw new InvalidOperationException("TCP session table capacity has been reached.");
@@ -32,15 +39,11 @@ public sealed class TcpSessionTable
 
     public bool TryGetOrAddSynReceived(TcpFlowKey key, uint clientInitialSequence, uint serverInitialSequence, out TcpSession? session)
     {
-        if (_sessions.TryGetValue(key, out session))
+        lock (_gate)
         {
-            return true;
-        }
-
-        lock (_capacityLock)
-        {
-            if (_sessions.TryGetValue(key, out session))
+            if (_sessions.TryGetValue(key, out var existingSession))
             {
+                session = existingSession;
                 return true;
             }
 
@@ -50,7 +53,7 @@ public sealed class TcpSessionTable
                 return false;
             }
 
-            session = new TcpSession(
+            var newSession = new TcpSession(
                 key,
                 clientInitialSequence,
                 serverInitialSequence,
@@ -58,39 +61,71 @@ public sealed class TcpSessionTable
                 serverInitialSequence + 1,
                 TcpSessionState.SynReceived);
 
-            return _sessions.TryAdd(key, session);
+            _sessions.Add(key, newSession);
+            session = newSession;
+            return true;
         }
     }
 
     public bool TryGet(TcpFlowKey key, out TcpSession? session)
-        => _sessions.TryGetValue(key, out session);
+    {
+        lock (_gate)
+        {
+            if (_sessions.TryGetValue(key, out var existingSession))
+            {
+                session = existingSession;
+                return true;
+            }
+
+            session = null;
+            return false;
+        }
+    }
 
     public bool TryRemove(TcpFlowKey key, out TcpSession? session)
-        => _sessions.TryRemove(key, out session);
+    {
+        lock (_gate)
+        {
+            if (_sessions.Remove(key, out var removedSession))
+            {
+                session = removedSession;
+                return true;
+            }
+
+            session = null;
+            return false;
+        }
+    }
 
     public bool TryEstablish(TcpFlowKey key, uint acknowledgmentNumber)
     {
-        while (_sessions.TryGetValue(key, out TcpSession? session))
+        lock (_gate)
         {
+            if (!_sessions.TryGetValue(key, out var session))
+            {
+                return false;
+            }
+
             if (session.State != TcpSessionState.SynReceived || acknowledgmentNumber != session.NextServerSequence)
             {
                 return false;
             }
 
-            TcpSession establishedSession = session with { State = TcpSessionState.Established };
-            if (_sessions.TryUpdate(key, establishedSession, session))
-            {
-                return true;
-            }
+            _sessions[key] = session with { State = TcpSessionState.Established };
+            return true;
         }
-
-        return false;
     }
 
     public bool TryAdvanceClientSequence(TcpFlowKey key, uint nextClientSequence, out TcpSession? updatedSession)
     {
-        while (_sessions.TryGetValue(key, out TcpSession? session))
+        lock (_gate)
         {
+            if (!_sessions.TryGetValue(key, out var session))
+            {
+                updatedSession = null;
+                return false;
+            }
+
             if (session.State != TcpSessionState.Established)
             {
                 updatedSession = null;
@@ -98,21 +133,22 @@ public sealed class TcpSessionTable
             }
 
             TcpSession advancedSession = session with { NextClientSequence = nextClientSequence };
-            if (_sessions.TryUpdate(key, advancedSession, session))
-            {
-                updatedSession = advancedSession;
-                return true;
-            }
+            _sessions[key] = advancedSession;
+            updatedSession = advancedSession;
+            return true;
         }
-
-        updatedSession = null;
-        return false;
     }
 
     public bool TryAdvanceServerSequence(TcpFlowKey key, uint nextServerSequence, out TcpSession? updatedSession)
     {
-        while (_sessions.TryGetValue(key, out TcpSession? session))
+        lock (_gate)
         {
+            if (!_sessions.TryGetValue(key, out var session))
+            {
+                updatedSession = null;
+                return false;
+            }
+
             if (session.State != TcpSessionState.Established)
             {
                 updatedSession = null;
@@ -120,14 +156,9 @@ public sealed class TcpSessionTable
             }
 
             TcpSession advancedSession = session with { NextServerSequence = nextServerSequence };
-            if (_sessions.TryUpdate(key, advancedSession, session))
-            {
-                updatedSession = advancedSession;
-                return true;
-            }
+            _sessions[key] = advancedSession;
+            updatedSession = advancedSession;
+            return true;
         }
-
-        updatedSession = null;
-        return false;
     }
 }

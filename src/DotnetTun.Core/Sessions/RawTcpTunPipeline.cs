@@ -1,4 +1,6 @@
 using DotnetTun.Abstractions;
+using DotnetTun.Abstractions.Dns;
+using DotnetTun.Abstractions.Routing;
 using DotnetTun.Core.Dns;
 using DotnetTun.Core.Packets;
 
@@ -19,20 +21,33 @@ public sealed class RawTcpTunPipeline(
         FakeIpPool fakeIpPool,
         IOutbound outbound,
         uint serverInitialSequence,
-        TimeSpan? responseReadTimeout = null)
-    {
-        var sessions = new TcpSessionTable();
-        var outboundPackets = new TunOutboundPacketQueue();
-        var payloadSink = new OutboundTcpPayloadSink(
-            fakeIpPool,
-            outbound,
-            responseReadTimeout,
-            remotePayloadHandler: (session, payload, cancellationToken) => QueueRemotePayloadAsync(sessions, outboundPackets, session, payload, cancellationToken));
-        var rawTcpHandler = new RawTcpSessionHandler(sessions, serverInitialSequence, payloadSink);
-        var tcpHandler = new TcpIpv4PacketHandler(rawTcpHandler);
-        var packetHandler = new Ipv4TunPacketHandler(tcpHandler);
-        return new RawTcpTunPipeline(packetHandler, outboundPackets, payloadSink);
-    }
+        TimeSpan? responseReadTimeout = null,
+        IDnsHijacker? dnsHijacker = null)
+        => CreateCore(
+            (sessions, outboundPackets) => new OutboundTcpPayloadSink(
+                fakeIpPool,
+                outbound,
+                responseReadTimeout,
+                remotePayloadHandler: (session, payload, cancellationToken) => QueueRemotePayloadAsync(sessions, outboundPackets, session, payload, cancellationToken)),
+            serverInitialSequence,
+            dnsHijacker);
+
+    public static RawTcpTunPipeline Create(
+        IFakeIpStore fakeIpStore,
+        IRouter router,
+        IReadOnlyDictionary<string, IOutbound> outbounds,
+        uint serverInitialSequence,
+        TimeSpan? responseReadTimeout = null,
+        IDnsHijacker? dnsHijacker = null)
+        => CreateCore(
+            (sessions, outboundPackets) => new OutboundTcpPayloadSink(
+                fakeIpStore,
+                router,
+                outbounds,
+                responseReadTimeout,
+                remotePayloadHandler: (session, payload, cancellationToken) => QueueRemotePayloadAsync(sessions, outboundPackets, session, payload, cancellationToken)),
+            serverInitialSequence,
+            dnsHijacker);
 
     public async ValueTask DisposeAsync()
     {
@@ -42,6 +57,27 @@ public sealed class RawTcpTunPipeline(
         }
     }
 
+    private static RawTcpTunPipeline CreateCore(
+        Func<TcpSessionTable, TunOutboundPacketQueue, OutboundTcpPayloadSink> createPayloadSink,
+        uint serverInitialSequence,
+        IDnsHijacker? dnsHijacker)
+    {
+        var sessions = new TcpSessionTable();
+        var outboundPackets = new TunOutboundPacketQueue();
+        var payloadSink = createPayloadSink(sessions, outboundPackets);
+        var rawTcpHandler = new RawTcpSessionHandler(sessions, serverInitialSequence, payloadSink);
+        var tcpHandler = new TcpIpv4PacketHandler(rawTcpHandler);
+        IIpv4PacketHandler ipv4Handler = tcpHandler;
+        if (dnsHijacker is not null)
+        {
+            var udpHandler = new UdpIpv4PacketHandler(new Dns53Sink(dnsHijacker));
+            ipv4Handler = new Ipv4ProtocolDispatcher(tcpHandler, udpHandler);
+        }
+
+        var packetHandler = new Ipv4TunPacketHandler(ipv4Handler);
+        return new RawTcpTunPipeline(packetHandler, outboundPackets, payloadSink);
+    }
+
     private static async ValueTask QueueRemotePayloadAsync(
         TcpSessionTable sessions,
         TunOutboundPacketQueue outboundPackets,
@@ -49,23 +85,25 @@ public sealed class RawTcpTunPipeline(
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken)
     {
-        if (!sessions.TryGet(session.Key, out TcpSession? currentSession) || currentSession is null || currentSession.State != TcpSessionState.Established)
+        if (!sessions.TryGet(session.Key, out var currentSession) || currentSession is null || currentSession.Value.State != TcpSessionState.Established)
         {
             return;
         }
 
-        byte[] serverPayloadPacket = TcpPacketBuilder.Build(
-            currentSession.Key.DestinationAddress,
-            currentSession.Key.SourceAddress,
-            currentSession.Key.DestinationPort,
-            currentSession.Key.SourcePort,
-            currentSession.NextServerSequence,
-            currentSession.NextClientSequence,
+        var establishedSession = currentSession.Value;
+
+        var serverPayloadPacket = TcpPacketBuilder.Build(
+            establishedSession.Key.DestinationAddressBits,
+            establishedSession.Key.SourceAddressBits,
+            establishedSession.Key.DestinationPort,
+            establishedSession.Key.SourcePort,
+            establishedSession.NextServerSequence,
+            establishedSession.NextClientSequence,
             TcpFlags.Psh | TcpFlags.Ack,
             payload.Span);
 
-        uint nextServerSequence = currentSession.NextServerSequence + (uint)payload.Length;
-        if (sessions.TryAdvanceServerSequence(currentSession.Key, nextServerSequence, out _))
+        var nextServerSequence = establishedSession.NextServerSequence + (uint)payload.Length;
+        if (sessions.TryAdvanceServerSequence(establishedSession.Key, nextServerSequence, out _))
         {
             await outboundPackets.WriteAsync(serverPayloadPacket, cancellationToken).ConfigureAwait(false);
         }

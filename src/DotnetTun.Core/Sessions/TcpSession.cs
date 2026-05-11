@@ -1,6 +1,6 @@
 namespace DotnetTun.Core.Sessions;
 
-public sealed record TcpSession(
+public readonly record struct TcpSession(
     TcpFlowKey Key,
     uint ClientInitialSequence,
     uint ServerInitialSequence,

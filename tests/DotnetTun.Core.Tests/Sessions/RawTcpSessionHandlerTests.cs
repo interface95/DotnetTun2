@@ -46,11 +46,11 @@ public sealed class RawTcpSessionHandlerTests
         var key = new TcpFlowKey(requestIp.SourceAddress, requestTcp.SourcePort, requestIp.DestinationAddress, requestTcp.DestinationPort);
         Assert.True(sessions.TryGet(key, out TcpSession? session));
         Assert.NotNull(session);
-        Assert.Equal(TcpSessionState.SynReceived, session.State);
-        Assert.Equal(1_000u, session.ClientInitialSequence);
-        Assert.Equal(9_000u, session.ServerInitialSequence);
-        Assert.Equal(1_001u, session.NextClientSequence);
-        Assert.Equal(9_001u, session.NextServerSequence);
+        Assert.Equal(TcpSessionState.SynReceived, session.Value.State);
+        Assert.Equal(1_000u, session.Value.ClientInitialSequence);
+        Assert.Equal(9_000u, session.Value.ServerInitialSequence);
+        Assert.Equal(1_001u, session.Value.NextClientSequence);
+        Assert.Equal(9_001u, session.Value.NextServerSequence);
     }
 
     [Fact]
@@ -161,7 +161,7 @@ public sealed class RawTcpSessionHandlerTests
         var key = new TcpFlowKey(ackIp.SourceAddress, ackTcp.SourcePort, ackIp.DestinationAddress, ackTcp.DestinationPort);
         Assert.True(sessions.TryGet(key, out TcpSession? session));
         Assert.NotNull(session);
-        Assert.Equal(TcpSessionState.Established, session.State);
+        Assert.Equal(TcpSessionState.Established, session.Value.State);
     }
 
     [Fact]
@@ -202,7 +202,7 @@ public sealed class RawTcpSessionHandlerTests
         var key = new TcpFlowKey(ackIp.SourceAddress, ackTcp.SourcePort, ackIp.DestinationAddress, ackTcp.DestinationPort);
         Assert.True(sessions.TryGet(key, out TcpSession? session));
         Assert.NotNull(session);
-        Assert.Equal(TcpSessionState.SynReceived, session.State);
+        Assert.Equal(TcpSessionState.SynReceived, session.Value.State);
     }
 
     [Fact]
@@ -266,7 +266,35 @@ public sealed class RawTcpSessionHandlerTests
         var key = new TcpFlowKey(payloadIp.SourceAddress, payloadTcp.SourcePort, payloadIp.DestinationAddress, payloadTcp.DestinationPort);
         Assert.True(sessions.TryGet(key, out TcpSession? session));
         Assert.NotNull(session);
-        Assert.Equal(1_003u, session.NextClientSequence);
+        Assert.Equal(1_003u, session.Value.NextClientSequence);
+    }
+
+    [Fact]
+    public void HandleAsync_WithEstablishedPayload_StaysWithinAllocationBudget()
+    {
+        var sessions = new TcpSessionTable();
+        var handler = new RawTcpSessionHandler(sessions, serverInitialSequence: 9_000, new NoopTcpPayloadSink());
+        EstablishSessionSynchronously(handler);
+
+        byte[] payloadPacket = PacketFixtures.CreateTcpPacket(
+            sourceAddress: [10, 0, 0, 2],
+            destinationAddress: [198, 18, 0, 1],
+            sourcePort: 54321,
+            destinationPort: 443,
+            sequenceNumber: 1_001,
+            acknowledgmentNumber: 9_001,
+            flags: TcpFlags.Psh | TcpFlags.Ack,
+            payload: [0x42, 0x43]);
+        Assert.True(Ipv4Packet.TryParse(payloadPacket, out var payloadIp));
+        Assert.True(TcpSegment.TryParse(payloadIp, out var payloadTcp));
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+
+        var responses = HandleSynchronously(handler, payloadIp, payloadTcp);
+
+        var allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Single(responses);
+        Assert.True(allocatedBytes <= 1_056, $"Allocated {allocatedBytes} bytes.");
     }
 
     [Fact]
@@ -303,7 +331,7 @@ public sealed class RawTcpSessionHandlerTests
         var key = new TcpFlowKey(payloadIp.SourceAddress, payloadTcp.SourcePort, payloadIp.DestinationAddress, payloadTcp.DestinationPort);
         Assert.True(sessions.TryGet(key, out var session));
         Assert.NotNull(session);
-        Assert.Equal(1_003u, session.NextClientSequence);
+        Assert.Equal(1_003u, session.Value.NextClientSequence);
     }
 
     [Fact]
@@ -338,7 +366,7 @@ public sealed class RawTcpSessionHandlerTests
         var key = new TcpFlowKey(payloadIp.SourceAddress, payloadTcp.SourcePort, payloadIp.DestinationAddress, payloadTcp.DestinationPort);
         Assert.True(sessions.TryGet(key, out var session));
         Assert.NotNull(session);
-        Assert.Equal(1_001u, session.NextClientSequence);
+        Assert.Equal(1_001u, session.Value.NextClientSequence);
     }
 
     [Fact]
@@ -426,7 +454,7 @@ public sealed class RawTcpSessionHandlerTests
         Assert.Empty(responses);
         Assert.Equal(0, sessions.Count);
         Assert.NotNull(payloadSink.ClosedSession);
-        Assert.Equal(54321, payloadSink.ClosedSession.Key.SourcePort);
+        Assert.Equal(54321, payloadSink.ClosedSession.Value.Key.SourcePort);
     }
 
     [Fact]
@@ -514,6 +542,12 @@ public sealed class RawTcpSessionHandlerTests
         await handler.HandleAsync(handshakeAckIp, handshakeAckTcp, TestContext.Current.CancellationToken);
     }
 
+    private static void EstablishSessionSynchronously(RawTcpSessionHandler handler)
+        => EstablishSessionAsync(handler).GetAwaiter().GetResult();
+
+    private static IReadOnlyList<ReadOnlyMemory<byte>> HandleSynchronously(RawTcpSessionHandler handler, Ipv4Packet packet, TcpSegment segment)
+        => handler.HandleAsync(packet, segment, TestContext.Current.CancellationToken).GetAwaiter().GetResult();
+
     private static TcpFlowKey Flow(int sourcePort)
         => new(
             System.Net.IPAddress.Parse("10.0.0.2"),
@@ -554,5 +588,14 @@ public sealed class RawTcpSessionHandlerTests
         }
 
         public TcpSession? ClosedSession { get; private set; }
+    }
+
+    private sealed class NoopTcpPayloadSink : ITcpPayloadSink
+    {
+        public ValueTask<IReadOnlyList<ReadOnlyMemory<byte>>> WriteAsync(TcpSession session, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult<IReadOnlyList<ReadOnlyMemory<byte>>>([]);
+
+        public ValueTask CloseAsync(TcpSession session, CancellationToken cancellationToken = default)
+            => ValueTask.CompletedTask;
     }
 }

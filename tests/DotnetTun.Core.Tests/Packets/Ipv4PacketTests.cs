@@ -99,6 +99,36 @@ public sealed class Ipv4PacketTests
         Assert.False(parsed);
     }
 
+    [Fact]
+    public void TryParse_WithTcpChecksumValidation_DoesNotAllocate()
+    {
+        var packet = PacketFixtures.CreateTcpPacket(
+            [0x0A, 0x00, 0x00, 0x01],
+            [0xC6, 0x12, 0x00, 0x01],
+            54321,
+            443,
+            1,
+            0,
+            TcpFlags.Syn);
+        Assert.True(Ipv4Packet.TryParse(packet, out var warmupIpv4Packet));
+        Assert.True(TcpSegment.TryParse(warmupIpv4Packet, out var warmupTcpSegment));
+        Assert.True(TcpChecksum.IsValid(warmupIpv4Packet, warmupTcpSegment));
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var valid = true;
+
+        for (var i = 0; i < 10; i++)
+        {
+            valid &= Ipv4Packet.TryParse(packet, out var ipv4Packet)
+                && TcpSegment.TryParse(ipv4Packet, out var tcpSegment)
+                && TcpChecksum.IsValid(ipv4Packet, tcpSegment);
+        }
+
+        var allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(valid);
+        Assert.Equal(0, allocatedBytes);
+    }
+
     private static void RecomputeIpv4HeaderChecksum(byte[] packet)
     {
         var headerLength = (packet[0] & 0x0F) * 4;

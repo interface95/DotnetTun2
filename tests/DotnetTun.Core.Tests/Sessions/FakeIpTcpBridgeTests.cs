@@ -186,6 +186,8 @@ public sealed class FakeIpTcpBridgeTests
 
     private sealed class LoopbackOutbound(int remotePort) : IOutbound
     {
+        public string Name => "test";
+
         public string? Host { get; private set; }
 
         public int? Port { get; private set; }
@@ -211,6 +213,8 @@ public sealed class FakeIpTcpBridgeTests
 
     private sealed class FailingOutbound : IOutbound
     {
+        public string Name => "test";
+
         public ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("Outbound should not be called for unknown fake IP.");
     }
@@ -221,6 +225,8 @@ public sealed class FakeIpTcpBridgeTests
         private readonly TaskCompletionSource _connectStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public Task ConnectStarted => _connectStarted.Task;
+
+        public string Name => "test";
 
         public ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
         {
@@ -298,6 +304,8 @@ public sealed class FakeIpTcpBridgeTests
         public Task ConnectStarted => _connectStarted.Task;
 
         public Task CancellationObserved => _stream.CancellationObserved;
+
+        public string Name => "test";
 
         public ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
         {

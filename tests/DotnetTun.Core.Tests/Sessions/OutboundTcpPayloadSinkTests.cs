@@ -1,5 +1,7 @@
 using System.Net;
 using DotnetTun.Abstractions;
+using DotnetTun.Abstractions.Dns;
+using DotnetTun.Abstractions.Routing;
 using DotnetTun.Core.Dns;
 using DotnetTun.Core.Sessions;
 using Xunit;
@@ -177,8 +179,156 @@ public sealed class OutboundTcpPayloadSinkTests
         Assert.Equal(1, outbound.ConnectCount);
     }
 
+    [Fact]
+    public async Task WriteAsync_WithRoutedFakeIp_UsesRouterSelectedOutbound()
+    {
+        // Arrange
+        IFakeIpStore store = new FakeIpStore(IPAddress.Parse("198.18.0.1"), IPAddress.Parse("198.18.0.254"));
+        var fakeIp = store.Allocate("api.anthropic.com");
+        var router = new RecordingRouter(RouteDecision.Through("premium"));
+        var defaultOutbound = new RecordingOutbound { Name = "default" };
+        var premiumOutbound = new RecordingOutbound { Name = "premium" };
+        var sink = new OutboundTcpPayloadSink(
+            store,
+            router,
+            new Dictionary<string, IOutbound>(StringComparer.OrdinalIgnoreCase)
+            {
+                [defaultOutbound.Name] = defaultOutbound,
+                [premiumOutbound.Name] = premiumOutbound,
+            });
+        var key = new TcpFlowKey(IPAddress.Parse("10.0.0.2"), 54321, fakeIp, 443);
+        var session = new TcpSession(key, 1_000, 9_000, 1_001, 9_001, TcpSessionState.Established);
+        byte[] payload = [0x42, 0x43];
+
+        // Act
+        await sink.WriteAsync(session, payload, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(new ConnectionContext("api.anthropic.com", 443), router.Context);
+        Assert.Equal(0, defaultOutbound.ConnectCount);
+        Assert.Equal("api.anthropic.com", premiumOutbound.Host);
+        Assert.Equal(443, premiumOutbound.Port);
+        Assert.Equal(payload, premiumOutbound.Stream.WrittenBytes.ToArray());
+    }
+
+    [Fact]
+    public async Task WriteAsync_WithRoutedFakeIpAndSameSession_ReusesSelectedOutboundStream()
+    {
+        // Arrange
+        IFakeIpStore store = new FakeIpStore(IPAddress.Parse("198.18.0.1"), IPAddress.Parse("198.18.0.254"));
+        var fakeIp = store.Allocate("api.anthropic.com");
+        var router = new RecordingRouter(RouteDecision.Through("premium"));
+        var premiumOutbound = new RecordingOutbound { Name = "premium" };
+        var sink = new OutboundTcpPayloadSink(
+            store,
+            router,
+            new Dictionary<string, IOutbound>(StringComparer.OrdinalIgnoreCase)
+            {
+                [premiumOutbound.Name] = premiumOutbound,
+            });
+        var key = new TcpFlowKey(IPAddress.Parse("10.0.0.2"), 54321, fakeIp, 443);
+        var session = new TcpSession(key, 1_000, 9_000, 1_001, 9_001, TcpSessionState.Established);
+
+        // Act
+        await sink.WriteAsync(session, new byte[] { 0x42 }, TestContext.Current.CancellationToken);
+        await sink.WriteAsync(session, new byte[] { 0x43 }, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.Equal(1, router.CallCount);
+        Assert.Equal(1, premiumOutbound.ConnectCount);
+        Assert.Equal(new byte[] { 0x42, 0x43 }, premiumOutbound.Stream.WrittenBytes.ToArray());
+    }
+
+    [Fact]
+    public async Task WriteAsync_WithRoutedUnknownFakeIp_RejectsBeforeRouting()
+    {
+        // Arrange
+        IFakeIpStore store = new FakeIpStore(IPAddress.Parse("198.18.0.1"), IPAddress.Parse("198.18.0.254"));
+        var router = new RecordingRouter(RouteDecision.Through("premium"));
+        var premiumOutbound = new RecordingOutbound { Name = "premium" };
+        var sink = new OutboundTcpPayloadSink(
+            store,
+            router,
+            new Dictionary<string, IOutbound>(StringComparer.OrdinalIgnoreCase)
+            {
+                [premiumOutbound.Name] = premiumOutbound,
+            });
+        var key = new TcpFlowKey(IPAddress.Parse("10.0.0.2"), 54321, IPAddress.Parse("198.18.0.99"), 443);
+        var session = new TcpSession(key, 1_000, 9_000, 1_001, 9_001, TcpSessionState.Established);
+
+        // Act
+        async Task WriteAsync()
+            => await sink.WriteAsync(session, new byte[] { 0x42 }, TestContext.Current.CancellationToken);
+
+        // Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(WriteAsync);
+        Assert.Contains("No domain lease exists", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, router.CallCount);
+        Assert.Equal(0, premiumOutbound.ConnectCount);
+    }
+
+    [Fact]
+    public async Task WriteAsync_WithRoutedDirectDecision_RejectsWithoutConnectingOutbound()
+    {
+        // Arrange
+        IFakeIpStore store = new FakeIpStore(IPAddress.Parse("198.18.0.1"), IPAddress.Parse("198.18.0.254"));
+        var fakeIp = store.Allocate("api.anthropic.com");
+        var router = new RecordingRouter(RouteDecision.Direct());
+        var premiumOutbound = new RecordingOutbound { Name = "premium" };
+        var sink = new OutboundTcpPayloadSink(
+            store,
+            router,
+            new Dictionary<string, IOutbound>(StringComparer.OrdinalIgnoreCase)
+            {
+                [premiumOutbound.Name] = premiumOutbound,
+            });
+        var key = new TcpFlowKey(IPAddress.Parse("10.0.0.2"), 54321, fakeIp, 443);
+        var session = new TcpSession(key, 1_000, 9_000, 1_001, 9_001, TcpSessionState.Established);
+
+        // Act
+        async Task WriteAsync()
+            => await sink.WriteAsync(session, new byte[] { 0x42 }, TestContext.Current.CancellationToken);
+
+        // Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(WriteAsync);
+        Assert.Contains("Direct TCP routing decisions are not supported", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, router.CallCount);
+        Assert.Equal(0, premiumOutbound.ConnectCount);
+    }
+
+    [Fact]
+    public async Task WriteAsync_WithRoutedMissingOutbound_RejectsWithoutConnectingOutbound()
+    {
+        // Arrange
+        IFakeIpStore store = new FakeIpStore(IPAddress.Parse("198.18.0.1"), IPAddress.Parse("198.18.0.254"));
+        var fakeIp = store.Allocate("api.anthropic.com");
+        var router = new RecordingRouter(RouteDecision.Through("missing"));
+        var premiumOutbound = new RecordingOutbound { Name = "premium" };
+        var sink = new OutboundTcpPayloadSink(
+            store,
+            router,
+            new Dictionary<string, IOutbound>(StringComparer.OrdinalIgnoreCase)
+            {
+                [premiumOutbound.Name] = premiumOutbound,
+            });
+        var key = new TcpFlowKey(IPAddress.Parse("10.0.0.2"), 54321, fakeIp, 443);
+        var session = new TcpSession(key, 1_000, 9_000, 1_001, 9_001, TcpSessionState.Established);
+
+        // Act
+        async Task WriteAsync()
+            => await sink.WriteAsync(session, new byte[] { 0x42 }, TestContext.Current.CancellationToken);
+
+        // Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(WriteAsync);
+        Assert.Contains("No outbound named 'missing' is registered", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, router.CallCount);
+        Assert.Equal(0, premiumOutbound.ConnectCount);
+    }
+
     private sealed class RecordingOutbound(byte[]? response = null) : IOutbound
     {
+        public string Name { get; init; } = "test";
+
         public string? Host { get; private set; }
 
         public int? Port { get; private set; }
@@ -228,10 +378,26 @@ public sealed class OutboundTcpPayloadSinkTests
 
     private sealed class DelayedResponseOutbound : IOutbound
     {
+        public string Name => "test";
+
         public DelayedResponseStream Stream { get; } = new();
 
         public ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
             => ValueTask.FromResult<Stream>(Stream);
+    }
+
+    private sealed class RecordingRouter(RouteDecision decision) : IRouter
+    {
+        public ConnectionContext? Context { get; private set; }
+
+        public int CallCount { get; private set; }
+
+        public ValueTask<RouteDecision> RouteAsync(ConnectionContext context, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            Context = context;
+            return ValueTask.FromResult(decision);
+        }
     }
 
     private sealed class DelayedResponseStream : Stream

@@ -23,4 +23,17 @@ internal static class PacketFixtures
             acknowledgmentNumber,
             flags,
             payload);
+
+    public static byte[] CreateUdpPacket(
+        byte[] sourceAddress,
+        byte[] destinationAddress,
+        int sourcePort,
+        int destinationPort,
+        ReadOnlySpan<byte> payload = default)
+        => UdpPacketBuilder.Build(
+            new IPAddress(sourceAddress),
+            new IPAddress(destinationAddress),
+            sourcePort,
+            destinationPort,
+            payload);
 }

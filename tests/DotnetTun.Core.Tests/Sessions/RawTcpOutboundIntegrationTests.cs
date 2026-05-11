@@ -118,7 +118,7 @@ public sealed class RawTcpOutboundIntegrationTests
         var key = new TcpFlowKey(IPAddress.Parse("10.0.0.2"), 54321, lease.FakeIp, 443);
         Assert.True(sessions.TryGet(key, out TcpSession? session));
         Assert.NotNull(session);
-        Assert.Equal(9_002u, session.NextServerSequence);
+        Assert.Equal(9_002u, session.Value.NextServerSequence);
     }
 
     private static async Task<IReadOnlyList<ReadOnlyMemory<byte>>> HandlePacketAsync(RawTcpSessionHandler handler, byte[] packet)
@@ -130,6 +130,8 @@ public sealed class RawTcpOutboundIntegrationTests
 
     private sealed class RecordingOutbound(byte[]? response = null) : IOutbound
     {
+        public string Name => "test";
+
         public string? Host { get; private set; }
 
         public int? Port { get; private set; }

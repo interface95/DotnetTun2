@@ -10,13 +10,13 @@ public sealed class RawTcpSessionHandler(TcpSessionTable sessions, uint serverIn
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        TcpFlowKey key = new(packet.SourceAddress, segment.SourcePort, packet.DestinationAddress, segment.DestinationPort);
+        var key = new TcpFlowKey(packet.SourceAddressBits, segment.SourcePort, packet.DestinationAddressBits, segment.DestinationPort);
 
         if (segment.IsRst)
         {
-            if (_sessions.TryRemove(key, out TcpSession? removedSession) && removedSession is not null && payloadSink is not null)
+            if (_sessions.TryRemove(key, out var removedSession) && removedSession is not null && payloadSink is not null)
             {
-                await payloadSink.CloseAsync(removedSession, cancellationToken).ConfigureAwait(false);
+                await payloadSink.CloseAsync(removedSession.Value, cancellationToken).ConfigureAwait(false);
             }
 
             return [];
@@ -24,23 +24,23 @@ public sealed class RawTcpSessionHandler(TcpSessionTable sessions, uint serverIn
 
         if (segment.IsFin)
         {
-            if (_sessions.TryRemove(key, out TcpSession? removedSession) && removedSession is not null)
+            if (_sessions.TryRemove(key, out var removedSession) && removedSession is not null)
             {
                 if (payloadSink is not null)
                 {
-                    await payloadSink.CloseAsync(removedSession, cancellationToken).ConfigureAwait(false);
+                    await payloadSink.CloseAsync(removedSession.Value, cancellationToken).ConfigureAwait(false);
                 }
 
-                byte[] response = TcpPacketBuilder.Build(
-                    packet.DestinationAddress,
-                    packet.SourceAddress,
+                var response = TcpPacketBuilder.Build(
+                    packet.DestinationAddressBits,
+                    packet.SourceAddressBits,
                     segment.DestinationPort,
                     segment.SourcePort,
-                    removedSession.NextServerSequence,
+                    removedSession.Value.NextServerSequence,
                     segment.SequenceNumber + 1,
                     TcpFlags.Ack);
 
-                IReadOnlyList<ReadOnlyMemory<byte>> responses = [response];
+                ReadOnlyMemory<byte>[] responses = [response];
                 return responses;
             }
 
@@ -55,16 +55,18 @@ public sealed class RawTcpSessionHandler(TcpSessionTable sessions, uint serverIn
                 return [];
             }
 
-            byte[] response = TcpPacketBuilder.Build(
-                packet.DestinationAddress,
-                packet.SourceAddress,
+            var synReceivedSession = session.Value;
+
+            var response = TcpPacketBuilder.Build(
+                packet.DestinationAddressBits,
+                packet.SourceAddressBits,
                 segment.DestinationPort,
                 segment.SourcePort,
-                session.ServerInitialSequence,
-                session.NextClientSequence,
-            TcpFlags.Syn | TcpFlags.Ack);
+                synReceivedSession.ServerInitialSequence,
+                synReceivedSession.NextClientSequence,
+                TcpFlags.Syn | TcpFlags.Ack);
 
-            IReadOnlyList<ReadOnlyMemory<byte>> responses = [response];
+            ReadOnlyMemory<byte>[] responses = [response];
             return responses;
         }
 
@@ -77,35 +79,42 @@ public sealed class RawTcpSessionHandler(TcpSessionTable sessions, uint serverIn
         {
             if (!_sessions.TryGet(key, out var currentSession)
                 || currentSession is null
-                || currentSession.State != TcpSessionState.Established
-                || segment.SequenceNumber != currentSession.NextClientSequence)
+                || currentSession.Value.State != TcpSessionState.Established
+                || segment.SequenceNumber != currentSession.Value.NextClientSequence)
             {
                 return [];
             }
 
-            uint nextClientSequence = segment.SequenceNumber + (uint)segment.Payload.Length;
+            var nextClientSequence = segment.SequenceNumber + (uint)segment.Payload.Length;
             if (_sessions.TryAdvanceClientSequence(key, nextClientSequence, out TcpSession? session) && session is not null)
             {
-                IReadOnlyList<ReadOnlyMemory<byte>> remotePayloads = payloadSink is null
+                var advancedSession = session.Value;
+                var remotePayloads = payloadSink is null
                     ? []
-                    : await payloadSink.WriteAsync(session, segment.Payload, cancellationToken).ConfigureAwait(false);
+                    : await payloadSink.WriteAsync(advancedSession, segment.Payload, cancellationToken).ConfigureAwait(false);
 
-                byte[] ackResponse = TcpPacketBuilder.Build(
-                    packet.DestinationAddress,
-                    packet.SourceAddress,
+                var ackResponse = TcpPacketBuilder.Build(
+                    packet.DestinationAddressBits,
+                    packet.SourceAddressBits,
                     segment.DestinationPort,
                     segment.SourcePort,
-                    session.NextServerSequence,
+                    advancedSession.NextServerSequence,
                     nextClientSequence,
                     TcpFlags.Ack);
 
-                var responses = new List<ReadOnlyMemory<byte>> { ackResponse };
-                TcpSession serverSession = session;
-                foreach (ReadOnlyMemory<byte> remotePayload in remotePayloads)
+                if (remotePayloads.Count == 0)
                 {
-                    byte[] serverPayloadPacket = TcpPacketBuilder.Build(
-                        packet.DestinationAddress,
-                        packet.SourceAddress,
+                    ReadOnlyMemory<byte>[] ackOnlyResponse = [ackResponse];
+                    return ackOnlyResponse;
+                }
+
+                var responses = new List<ReadOnlyMemory<byte>>(remotePayloads.Count + 1) { ackResponse };
+                var serverSession = advancedSession;
+                foreach (var remotePayload in remotePayloads)
+                {
+                    var serverPayloadPacket = TcpPacketBuilder.Build(
+                        packet.DestinationAddressBits,
+                        packet.SourceAddressBits,
                         segment.DestinationPort,
                         segment.SourcePort,
                         serverSession.NextServerSequence,
@@ -114,10 +123,10 @@ public sealed class RawTcpSessionHandler(TcpSessionTable sessions, uint serverIn
                         remotePayload.Span);
                     responses.Add(serverPayloadPacket);
 
-                    uint nextServerSequence = serverSession.NextServerSequence + (uint)remotePayload.Length;
+                    var nextServerSequence = serverSession.NextServerSequence + (uint)remotePayload.Length;
                     if (_sessions.TryAdvanceServerSequence(key, nextServerSequence, out TcpSession? updatedSession) && updatedSession is not null)
                     {
-                        serverSession = updatedSession;
+                        serverSession = updatedSession.Value;
                     }
                 }
 
