@@ -5,6 +5,7 @@ obj/
 .idea/
 .DS_Store
 TestResults/
+BenchmarkDotNet.Artifacts/
 *.user
 *.suo
 

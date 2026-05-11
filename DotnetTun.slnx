@@ -11,6 +11,9 @@
   <Folder Name="/samples/">
     <Project Path="samples/DotnetTun.Demo.Cli/DotnetTun.Demo.Cli.csproj" />
   </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/DotnetTun.Core.Benchmarks/DotnetTun.Core.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DotnetTun.Core.Tests/DotnetTun.Core.Tests.csproj" />
     <Project Path="tests/DotnetTun.Demo.Cli.Tests/DotnetTun.Demo.Cli.Tests.csproj" />
