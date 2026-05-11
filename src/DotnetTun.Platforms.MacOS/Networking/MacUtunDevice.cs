@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using System.Buffers;
 using System.Text;
 using DotnetTun.Abstractions;
 
@@ -7,105 +7,273 @@ namespace DotnetTun.Platforms.MacOS.Networking;
 public sealed class MacUtunDevice : ITunDevice
 {
     private readonly IUtunNativeApi _nativeApi;
-    private readonly ConcurrentDictionary<int, byte> _cancellationClosedFileDescriptors = new();
+    private readonly object _lifecycleLock = new();
+    private int? _fileDescriptor;
+    private string? _interfaceName;
 
     public MacUtunDevice(IUtunNativeApi nativeApi)
     {
         _nativeApi = nativeApi ?? throw new ArgumentNullException(nameof(nativeApi));
     }
 
-    public Task<MacUtunOpenResult> OpenAsync(CancellationToken cancellationToken = default)
+    public bool IsOpen
+    {
+        get
+        {
+            lock (_lifecycleLock)
+            {
+                return _fileDescriptor is not null;
+            }
+        }
+    }
+
+    public string? InterfaceName
+    {
+        get
+        {
+            lock (_lifecycleLock)
+            {
+                return _interfaceName;
+            }
+        }
+    }
+
+    public ValueTask OpenAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (IsOpen)
+        {
+            return ValueTask.CompletedTask;
+        }
 
         Span<byte> interfaceNameBuffer = stackalloc byte[256];
-        int fileDescriptor = _nativeApi.OpenUtun(-1, interfaceNameBuffer, out int errorNumber);
+        var fileDescriptor = _nativeApi.OpenUtun(-1, interfaceNameBuffer, out var errorNumber);
         if (fileDescriptor < 0)
         {
-            return Task.FromResult(MacUtunOpenResult.Failed(errorNumber));
+            throw new IOException($"macOS utun open failed with error {errorNumber}.");
         }
 
-        int nullIndex = interfaceNameBuffer.IndexOf((byte)0);
-        ReadOnlySpan<byte> interfaceNameBytes = nullIndex >= 0 ? interfaceNameBuffer[..nullIndex] : interfaceNameBuffer;
-        string interfaceName = Encoding.ASCII.GetString(interfaceNameBytes).Trim();
-        if (string.IsNullOrWhiteSpace(interfaceName))
+        var interfaceName = ReadInterfaceName(interfaceNameBuffer);
+        if (!IsValidUtunInterfaceName(interfaceName))
         {
-            return Task.FromResult(MacUtunOpenResult.Failed(errorNumber));
+            _ = _nativeApi.Close(fileDescriptor, out _);
+            throw new IOException($"macOS utun open returned an invalid interface name '{interfaceName}'.");
         }
 
-        return Task.FromResult(MacUtunOpenResult.Opened(fileDescriptor, interfaceName));
-    }
-
-    public async Task<TunDeviceOpenResult> OpenTunAsync(CancellationToken cancellationToken = default)
-    {
-        MacUtunOpenResult result = await OpenAsync(cancellationToken);
-        if (!result.Success || string.IsNullOrWhiteSpace(result.InterfaceName))
+        var shouldCloseOpenedFileDescriptor = false;
+        lock (_lifecycleLock)
         {
-            return TunDeviceOpenResult.Failed(result.ErrorNumber);
-        }
-
-        return TunDeviceOpenResult.Opened(result.FileDescriptor, result.InterfaceName);
-    }
-
-    public ValueTask<TunPacketIoResult> ReadPacketAsync(int fileDescriptor, Memory<byte> buffer, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        using var cancellationRegistration = cancellationToken.Register(
-            static state =>
+            if (_fileDescriptor is not null)
             {
-                var cancellationState = (ReadCancellationState)state!;
-                if (cancellationState.NativeApi.Close(cancellationState.FileDescriptor, out _) == 0)
+                shouldCloseOpenedFileDescriptor = true;
+            }
+            else
+            {
+                _fileDescriptor = fileDescriptor;
+                _interfaceName = interfaceName;
+            }
+        }
+
+        if (shouldCloseOpenedFileDescriptor)
+        {
+            var closeResult = _nativeApi.Close(fileDescriptor, out var closeErrorNumber);
+            if (closeResult < 0)
+            {
+                throw new IOException($"macOS utun close after concurrent open failed with error {closeErrorNumber}.");
+            }
+
+            return ValueTask.CompletedTask;
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var fileDescriptor = GetOpenFileDescriptor();
+
+        using var cancellationRegistration = cancellationToken.CanBeCanceled
+            ? cancellationToken.Register(
+                static state =>
                 {
-                    cancellationState.CancellationClosedFileDescriptors[cancellationState.FileDescriptor] = 0;
-                }
-            },
-            new ReadCancellationState(_nativeApi, _cancellationClosedFileDescriptors, fileDescriptor));
+                    var cancellationState = (ReadCancellationState)state!;
+                    if (cancellationState.Device.TryClaimOpenFileDescriptor(cancellationState.FileDescriptor))
+                    {
+                        _ = cancellationState.NativeApi.Close(cancellationState.FileDescriptor, out _);
+                    }
+                },
+                new ReadCancellationState(_nativeApi, this, fileDescriptor))
+            : default;
 
-        var bytesTransferred = _nativeApi.ReadPacket(fileDescriptor, buffer.Span, out var errorNumber);
-        if (bytesTransferred < 0 && cancellationToken.IsCancellationRequested)
+        var nativeBufferLength = buffer.Length + MacUtunFrame.HeaderLength;
+        var nativeBuffer = ArrayPool<byte>.Shared.Rent(nativeBufferLength);
+        try
         {
-            throw new OperationCanceledException(cancellationToken);
+            var bytesTransferred = _nativeApi.ReadPacket(fileDescriptor, nativeBuffer.AsSpan(0, nativeBufferLength), out var errorNumber);
+            if (bytesTransferred < 0 && cancellationToken.IsCancellationRequested)
+            {
+                _ = TryClaimOpenFileDescriptor(fileDescriptor);
+                throw new OperationCanceledException(cancellationToken);
+            }
+
+            if (bytesTransferred < 0)
+            {
+                throw new IOException($"TUN packet read failed with error {errorNumber}.");
+            }
+
+            if (bytesTransferred > nativeBufferLength)
+            {
+                throw new InvalidOperationException("TUN packet read returned more bytes than the supplied buffer can hold.");
+            }
+
+            if (bytesTransferred < MacUtunFrame.HeaderLength)
+            {
+                throw new InvalidDataException("utun packet read returned a short address-family header.");
+            }
+
+            var frame = nativeBuffer.AsSpan(0, bytesTransferred);
+            var addressFamily = MacUtunFrame.ReadAddressFamily(frame);
+            if (!MacUtunFrame.IsSupportedAddressFamily(addressFamily))
+            {
+                throw new InvalidDataException($"utun packet read returned unsupported address family {addressFamily}.");
+            }
+
+            if (!MacUtunFrame.TryReadPayload(frame, buffer.Span, out var payloadBytesTransferred))
+            {
+                throw new InvalidOperationException("TUN packet read could not strip the utun address-family header.");
+            }
+
+            return ValueTask.FromResult(payloadBytesTransferred);
         }
-
-        var result = bytesTransferred < 0
-            ? TunPacketIoResult.Failed(errorNumber)
-            : TunPacketIoResult.Transferred(bytesTransferred);
-
-        return ValueTask.FromResult(result);
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(nativeBuffer);
+        }
     }
 
-    public ValueTask<TunPacketIoResult> WritePacketAsync(int fileDescriptor, ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
+    public ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var fileDescriptor = GetOpenFileDescriptor();
 
-        int bytesTransferred = _nativeApi.WritePacket(fileDescriptor, packet.Span, out int errorNumber);
-        TunPacketIoResult result = bytesTransferred < 0
-            ? TunPacketIoResult.Failed(errorNumber)
-            : TunPacketIoResult.Transferred(bytesTransferred);
+        var framedPacketLength = packet.Length + MacUtunFrame.HeaderLength;
+        var framedPacket = ArrayPool<byte>.Shared.Rent(framedPacketLength);
+        try
+        {
+            var framedPacketSpan = framedPacket.AsSpan(0, framedPacketLength);
+            if (!MacUtunFrame.TryWriteFrame(packet.Span, framedPacketSpan, out var bytesWritten))
+            {
+                throw new InvalidDataException("Only IPv4 and IPv6 packets can be written to a utun device.");
+            }
 
-        return ValueTask.FromResult(result);
+            var bytesTransferred = _nativeApi.WritePacket(fileDescriptor, framedPacketSpan[..bytesWritten], out var errorNumber);
+            if (bytesTransferred < 0)
+            {
+                throw new IOException($"TUN packet write failed with error {errorNumber}.");
+            }
+
+            if (bytesTransferred != bytesWritten)
+            {
+                throw new IOException($"TUN packet write failed with partial framed write: wrote {bytesTransferred} of {bytesWritten} bytes.");
+            }
+
+            return ValueTask.CompletedTask;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(framedPacket);
+        }
     }
 
-    public ValueTask<TunDeviceCloseResult> CloseTunAsync(int fileDescriptor, CancellationToken cancellationToken = default)
+    public ValueTask CloseAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-
-        if (_cancellationClosedFileDescriptors.TryRemove(fileDescriptor, out _))
+        if (!TryClaimOpenFileDescriptor(out var fileDescriptor))
         {
-            return ValueTask.FromResult(TunDeviceCloseResult.Closed());
+            return ValueTask.CompletedTask;
         }
 
-        int closeResult = _nativeApi.Close(fileDescriptor, out int errorNumber);
-        TunDeviceCloseResult result = closeResult < 0
-            ? TunDeviceCloseResult.Failed(errorNumber)
-            : TunDeviceCloseResult.Closed();
+        var closeResult = _nativeApi.Close(fileDescriptor, out var errorNumber);
+        if (closeResult < 0)
+        {
+            throw new IOException($"macOS utun close failed with error {errorNumber}.");
+        }
 
-        return ValueTask.FromResult(result);
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask DisposeAsync() => CloseAsync(CancellationToken.None);
+
+    private int GetOpenFileDescriptor()
+    {
+        lock (_lifecycleLock)
+        {
+            return _fileDescriptor ?? throw new InvalidOperationException("TUN device is not open.");
+        }
+    }
+
+    private bool TryClaimOpenFileDescriptor(out int fileDescriptor)
+    {
+        lock (_lifecycleLock)
+        {
+            if (_fileDescriptor is not { } currentFileDescriptor)
+            {
+                fileDescriptor = -1;
+                return false;
+            }
+
+            _fileDescriptor = null;
+            _interfaceName = null;
+            fileDescriptor = currentFileDescriptor;
+            return true;
+        }
+    }
+
+    private bool TryClaimOpenFileDescriptor(int expectedFileDescriptor)
+    {
+        lock (_lifecycleLock)
+        {
+            if (_fileDescriptor != expectedFileDescriptor)
+            {
+                return false;
+            }
+
+            _fileDescriptor = null;
+            _interfaceName = null;
+            return true;
+        }
     }
 
     private sealed record ReadCancellationState(
         IUtunNativeApi NativeApi,
-        ConcurrentDictionary<int, byte> CancellationClosedFileDescriptors,
+        MacUtunDevice Device,
         int FileDescriptor);
+
+    private static string ReadInterfaceName(ReadOnlySpan<byte> interfaceNameBuffer)
+    {
+        var nullIndex = interfaceNameBuffer.IndexOf((byte)0);
+        var interfaceNameBytes = nullIndex >= 0 ? interfaceNameBuffer[..nullIndex] : interfaceNameBuffer;
+        return Encoding.ASCII.GetString(interfaceNameBytes).Trim();
+    }
+
+    private static bool IsValidUtunInterfaceName(string interfaceName)
+    {
+        const string prefix = "utun";
+        if (!interfaceName.StartsWith(prefix, StringComparison.Ordinal) || interfaceName.Length == prefix.Length)
+        {
+            return false;
+        }
+
+        foreach (var character in interfaceName.AsSpan(prefix.Length))
+        {
+            if (!char.IsAsciiDigit(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
 }

@@ -46,6 +46,97 @@ public sealed class MacTunConfiguratorTests
     }
 
     [Fact]
+    public async Task ConfigureAsync_WhenExcludedIpsExistButDefaultGatewayIsMissing_ThrowsBeforeRunningCommands()
+    {
+        // Arrange
+        var runner = new RecordingCommandRunner();
+        var configurator = new MacTunConfigurator(new MacRouteCommandBuilder(), runner);
+        var options = CreateOptions(ExcludedIps: [IPAddress.Parse("203.0.113.10")]);
+
+        // Act
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await configurator.ConfigureAsync(options, TestContext.Current.CancellationToken));
+
+        // Assert
+        Assert.Contains("default gateway", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(runner.Commands);
+    }
+
+    [Fact]
+    public async Task ConfigureAsync_WhenConfigureCommandFailsAfterPartialConfigure_RunsCleanupAndRethrowsOriginalFailure()
+    {
+        // Arrange
+        var options = CreateOptions();
+        var commandBuilder = new MacRouteCommandBuilder();
+        var expectedFailure = new InvalidOperationException("route add failed");
+        var runner = new FailingAfterCommandRunner(failOnCommandNumber: 6, expectedFailure);
+        var configurator = new MacTunConfigurator(commandBuilder, runner);
+
+        // Act
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await configurator.ConfigureAsync(options, TestContext.Current.CancellationToken));
+
+        // Assert
+        Assert.Same(expectedFailure, exception);
+        MacCommand[] expectedCommands =
+        [
+            .. commandBuilder.BuildConfigureCommands(options).Take(6),
+            .. commandBuilder.BuildExcludeCleanupCommands(options),
+            .. commandBuilder.BuildCleanupCommands(options)
+        ];
+        Assert.Equal(expectedCommands, runner.Commands);
+        Assert.All(runner.Commands.Skip(6), command => Assert.True(command.IgnoreFailure));
+    }
+
+    [Fact]
+    public async Task ConfigureAsync_WhenRollbackCleanupFails_RethrowsOriginalConfigureFailure()
+    {
+        // Arrange
+        var options = CreateOptions();
+        var expectedFailure = new InvalidOperationException("route add failed");
+        var cleanupFailure = new IOException("route delete failed");
+        var runner = new FailingDuringConfigureAndCleanupRunner(
+            configureFailOnCommandNumber: 6,
+            expectedFailure,
+            cleanupFailure);
+        var configurator = new MacTunConfigurator(new MacRouteCommandBuilder(), runner);
+
+        // Act
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await configurator.ConfigureAsync(options, TestContext.Current.CancellationToken));
+
+        // Assert
+        Assert.Same(expectedFailure, exception);
+        Assert.Equal(7, runner.Commands.Count);
+        Assert.True(runner.Commands[6].IgnoreFailure);
+        Assert.Same(cleanupFailure, exception.Data["DotnetTun.Platforms.MacOS.RollbackCleanupException"]);
+    }
+
+    [Fact]
+    public async Task ConfigureAsync_WhenConfigureIsCanceledAfterPartialConfigure_StillAttemptsRollbackCleanup()
+    {
+        // Arrange
+        var options = CreateOptions();
+        var commandBuilder = new MacRouteCommandBuilder();
+        using var cancellationSource = new CancellationTokenSource();
+        var runner = new CancelingAfterCommandRunner(failOnCommandNumber: 6, cancellationSource);
+        var configurator = new MacTunConfigurator(commandBuilder, runner);
+
+        // Act
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            async () => await configurator.ConfigureAsync(options, cancellationSource.Token));
+
+        // Assert
+        MacCommand[] expectedCommands =
+        [
+            .. commandBuilder.BuildConfigureCommands(options).Take(6),
+            .. commandBuilder.BuildExcludeCleanupCommands(options),
+            .. commandBuilder.BuildCleanupCommands(options)
+        ];
+        Assert.Equal(expectedCommands, runner.Commands);
+    }
+
+    [Fact]
     public async Task CleanupAsync_RunsCleanupCommandsInOrder()
     {
         // Arrange
@@ -175,6 +266,68 @@ public sealed class MacTunConfiguratorTests
             if (!command.IgnoreFailure)
             {
                 throw new InvalidOperationException("cleanup delete command was not marked ignore-failure");
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FailingAfterCommandRunner(int failOnCommandNumber, Exception exception) : IMacCommandRunner
+    {
+        public List<MacCommand> Commands { get; } = [];
+
+        public ValueTask RunAsync(MacCommand command, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command);
+            if (Commands.Count == failOnCommandNumber)
+            {
+                throw exception;
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FailingDuringConfigureAndCleanupRunner(
+        int configureFailOnCommandNumber,
+        Exception configureException,
+        Exception cleanupException) : IMacCommandRunner
+    {
+        public List<MacCommand> Commands { get; } = [];
+
+        public ValueTask RunAsync(MacCommand command, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command);
+            if (Commands.Count == configureFailOnCommandNumber)
+            {
+                throw configureException;
+            }
+
+            if (Commands.Count > configureFailOnCommandNumber)
+            {
+                throw cleanupException;
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class CancelingAfterCommandRunner(int failOnCommandNumber, CancellationTokenSource cancellationSource) : IMacCommandRunner
+    {
+        public List<MacCommand> Commands { get; } = [];
+
+        public ValueTask RunAsync(MacCommand command, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command);
+            if (Commands.Count == failOnCommandNumber)
+            {
+                cancellationSource.Cancel();
+                throw new OperationCanceledException(cancellationSource.Token);
+            }
+
+            if (Commands.Count > failOnCommandNumber && cancellationToken.IsCancellationRequested)
+            {
+                throw new InvalidOperationException("Rollback cleanup reused the canceled configure token.");
             }
 
             return ValueTask.CompletedTask;
