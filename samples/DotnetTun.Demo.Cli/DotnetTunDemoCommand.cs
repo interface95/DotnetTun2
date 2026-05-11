@@ -12,7 +12,7 @@ namespace DotnetTun.Demo.Cli;
 
 public interface ITunDemoRawTunProxy : IAsyncDisposable
 {
-    Task RunOpenAsync(int fileDescriptor, CancellationToken cancellationToken = default);
+    Task RunOpenAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class TunDemoRuntime
@@ -66,8 +66,8 @@ public sealed class TunDemoRuntime
 
     private sealed class RawTunProxyAdapter(RawTunProxy proxy) : ITunDemoRawTunProxy
     {
-        public Task RunOpenAsync(int fileDescriptor, CancellationToken cancellationToken = default)
-            => proxy.RunOpenAsync(fileDescriptor, cancellationToken);
+        public Task RunOpenAsync(CancellationToken cancellationToken = default)
+            => proxy.RunOpenAsync(cancellationToken);
 
         public ValueTask DisposeAsync() => proxy.DisposeAsync();
     }
@@ -444,7 +444,6 @@ public abstract class DotnetTunDemoCommand
             MacTunOptions? macOptions = null;
             MacTunConfigurator? configurator = null;
             ITunDevice? tunDevice = null;
-            int? openedFileDescriptor = null;
             try
             {
                 PrintPlan();
@@ -456,16 +455,15 @@ public abstract class DotnetTunDemoCommand
                 tunDevice = runtime.CreateTunDevice();
                 configurator = runtime.CreateConfigurator();
 
-                TunDeviceOpenResult openResult = await tunDevice.OpenTunAsync(stopSource.Token).ConfigureAwait(false);
-                if (!openResult.Success || string.IsNullOrWhiteSpace(openResult.InterfaceName))
+                await tunDevice.OpenAsync(stopSource.Token).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(tunDevice.InterfaceName))
                 {
-                    throw new IOException($"macOS utun open failed with error {openResult.ErrorNumber}.");
+                    throw new IOException("macOS utun open did not return an interface name.");
                 }
 
-                openedFileDescriptor = openResult.FileDescriptor;
                 IPAddress? defaultGateway = await runtime.GetDefaultGatewayAsync(stopSource.Token).ConfigureAwait(false);
                 macOptions = CreateMacOptions(
-                    openResult.InterfaceName,
+                    tunDevice.InterfaceName,
                     ResolveExcludedServerIps(socks5Options.Host),
                     defaultGateway);
                 await configurator.ConfigureAsync(macOptions, stopSource.Token).ConfigureAwait(false);
@@ -475,7 +473,7 @@ public abstract class DotnetTunDemoCommand
                     outbound,
                     mtu,
                     responseReadTimeout);
-                await proxy.RunOpenAsync(openedFileDescriptor.Value, stopSource.Token).ConfigureAwait(false);
+                await proxy.RunOpenAsync(stopSource.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stopSource.IsCancellationRequested)
             {
@@ -494,13 +492,9 @@ public abstract class DotnetTunDemoCommand
                 {
                     try
                     {
-                        if (tunDevice is not null && openedFileDescriptor is not null)
+                        if (tunDevice is not null)
                         {
-                            TunDeviceCloseResult closeResult = await tunDevice.CloseTunAsync(openedFileDescriptor.Value, CancellationToken.None).ConfigureAwait(false);
-                            if (!closeResult.Success)
-                            {
-                                throw new IOException($"macOS utun close failed with error {closeResult.ErrorNumber}.");
-                            }
+                            await tunDevice.CloseAsync(CancellationToken.None).ConfigureAwait(false);
                         }
                     }
                     finally

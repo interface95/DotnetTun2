@@ -74,13 +74,13 @@ public sealed class TunCommandTests
         // Assert
         Assert.Equal(0, exitCode);
         Assert.Equal("open:utun9", operations[0]);
-        Assert.Contains(operations, operation => operation == "run:123");
-        Assert.Equal("close:123", operations[^1]);
+        Assert.Contains(operations, operation => operation == "run");
+        Assert.Equal("close:utun9", operations[^1]);
 
         int firstConfigureIndex = operations.FindIndex(operation => operation.StartsWith("command:sudo ifconfig", StringComparison.Ordinal));
-        int runIndex = operations.IndexOf("run:123");
+        int runIndex = operations.IndexOf("run");
         int firstCleanupIndex = operations.FindLastIndex(operation => operation.StartsWith("command:sudo route delete", StringComparison.Ordinal));
-        int closeIndex = operations.IndexOf("close:123");
+        int closeIndex = operations.IndexOf("close:utun9");
         Assert.True(firstConfigureIndex > 0);
         Assert.True(firstConfigureIndex < runIndex);
         Assert.True(runIndex < firstCleanupIndex);
@@ -177,7 +177,7 @@ public sealed class TunCommandTests
         // Assert
         InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(RunAsync);
         Assert.Contains("cleanup failed", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("close:123", operations);
+        Assert.Contains("close:utun9", operations);
     }
 
     [Fact]
@@ -210,30 +210,40 @@ public sealed class TunCommandTests
 
         // Assert
         Assert.Equal(0, exitCode);
-        Assert.Contains(operations, operation => operation == "run:123");
+        Assert.Contains(operations, operation => operation == "run");
         Assert.Contains(operations, operation => operation.StartsWith("command:sudo route delete", StringComparison.Ordinal));
-        Assert.Equal("close:123", operations[^1]);
+        Assert.Equal("close:utun9", operations[^1]);
     }
 
     private sealed class RecordingTunDevice(List<string> operations, string interfaceName) : ITunDevice
     {
-        public Task<TunDeviceOpenResult> OpenTunAsync(CancellationToken cancellationToken = default)
+        public bool IsOpen { get; private set; }
+
+        public string? InterfaceName { get; private set; }
+
+        public ValueTask OpenAsync(CancellationToken cancellationToken = default)
         {
             operations.Add($"open:{interfaceName}");
-            return Task.FromResult(TunDeviceOpenResult.Opened(123, interfaceName));
+            IsOpen = true;
+            InterfaceName = interfaceName;
+            return ValueTask.CompletedTask;
         }
 
-        public ValueTask<TunPacketIoResult> ReadPacketAsync(int fileDescriptor, Memory<byte> buffer, CancellationToken cancellationToken = default)
-            => ValueTask.FromResult(TunPacketIoResult.Transferred(0));
+        public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(0);
 
-        public ValueTask<TunPacketIoResult> WritePacketAsync(int fileDescriptor, ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
-            => ValueTask.FromResult(TunPacketIoResult.Transferred(packet.Length));
+        public ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
+            => ValueTask.CompletedTask;
 
-        public ValueTask<TunDeviceCloseResult> CloseTunAsync(int fileDescriptor, CancellationToken cancellationToken = default)
+        public ValueTask CloseAsync(CancellationToken cancellationToken = default)
         {
-            operations.Add($"close:{fileDescriptor}");
-            return ValueTask.FromResult(TunDeviceCloseResult.Closed());
+            operations.Add($"close:{InterfaceName}");
+            IsOpen = false;
+            InterfaceName = null;
+            return ValueTask.CompletedTask;
         }
+
+        public ValueTask DisposeAsync() => CloseAsync();
     }
 
     private sealed class RecordingMacCommandRunner(List<string> operations) : IMacCommandRunner
@@ -261,9 +271,9 @@ public sealed class TunCommandTests
 
     private sealed class RecordingTunProxy(List<string> operations) : ITunDemoRawTunProxy
     {
-        public Task RunOpenAsync(int fileDescriptor, CancellationToken cancellationToken = default)
+        public Task RunOpenAsync(CancellationToken cancellationToken = default)
         {
-            operations.Add($"run:{fileDescriptor}");
+            operations.Add("run");
             return Task.CompletedTask;
         }
 
@@ -274,9 +284,9 @@ public sealed class TunCommandTests
     {
         public TaskCompletionSource RunStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public async Task RunOpenAsync(int fileDescriptor, CancellationToken cancellationToken = default)
+        public async Task RunOpenAsync(CancellationToken cancellationToken = default)
         {
-            operations.Add($"run:{fileDescriptor}");
+            operations.Add("run");
             RunStarted.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
         }

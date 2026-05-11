@@ -7,6 +7,8 @@ namespace DotnetTun.Outbounds.Socks5;
 
 public sealed class Socks5Outbound(Socks5OutboundOptions options) : IOutbound
 {
+    public string Name => options.Name;
+
     public async ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(host))

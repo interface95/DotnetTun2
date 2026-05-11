@@ -13,44 +13,38 @@ public sealed class TunPacketPump(ITunDevice tunDevice, ITunPacketHandler handle
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        TunDeviceOpenResult openResult = await _tunDevice.OpenTunAsync(cancellationToken).ConfigureAwait(false);
-        if (!openResult.Success)
-        {
-            throw new IOException($"TUN device open failed with error {openResult.ErrorNumber}.");
-        }
-
-        int fileDescriptor = openResult.FileDescriptor;
+        await _tunDevice.OpenAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await RunOpenAsync(fileDescriptor, cancellationToken).ConfigureAwait(false);
+            await RunOpenAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            TunDeviceCloseResult closeResult = await _tunDevice.CloseTunAsync(fileDescriptor, CancellationToken.None).ConfigureAwait(false);
-            if (!closeResult.Success)
-            {
-                throw new IOException($"TUN device close failed with error {closeResult.ErrorNumber}.");
-            }
+            await _tunDevice.CloseAsync(CancellationToken.None).ConfigureAwait(false);
         }
     }
 
-    public async Task RunOpenAsync(int fileDescriptor, CancellationToken cancellationToken = default)
+    public async Task RunOpenAsync(CancellationToken cancellationToken = default)
     {
         using var runSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Task? outboundWriteTask = _outboundPackets is null
             ? null
-            : WriteOutboundPacketsAsync(fileDescriptor, _outboundPackets, runSource.Token);
+            : WriteOutboundPacketsAsync(_outboundPackets, runSource.Token);
 
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                await PumpOnceAsync(fileDescriptor, runSource.Token).ConfigureAwait(false);
+                await PumpOnceAsync(runSource.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException exception) when (IsExpectedCancellation(exception, cancellationToken))
         {
             IgnoreExpectedCancellation(exception);
+        }
+        catch (IOException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            IgnoreExpectedReadFailureAfterCancellation(exception);
         }
         finally
         {
@@ -69,52 +63,42 @@ public sealed class TunPacketPump(ITunDevice tunDevice, ITunPacketHandler handle
         }
     }
 
-    public async ValueTask PumpOnceAsync(int fileDescriptor, CancellationToken cancellationToken = default)
+    public async ValueTask PumpOnceAsync(CancellationToken cancellationToken = default)
     {
-        byte[] readBuffer = new byte[_mtu];
-        TunPacketIoResult readResult = await _tunDevice.ReadPacketAsync(fileDescriptor, readBuffer, cancellationToken).ConfigureAwait(false);
-        if (!readResult.Success)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            throw new IOException($"TUN packet read failed with error {readResult.ErrorNumber}.");
-        }
-
-        if (readResult.BytesTransferred == 0)
+        var readBuffer = new byte[_mtu];
+        var bytesTransferred = await _tunDevice.ReadAsync(readBuffer, cancellationToken).ConfigureAwait(false);
+        if (bytesTransferred == 0)
         {
             return;
         }
 
-        if (readResult.BytesTransferred > readBuffer.Length)
+        if (bytesTransferred > readBuffer.Length)
         {
             throw new InvalidOperationException("TUN packet read returned more bytes than the supplied buffer can hold.");
         }
 
-        byte[] packet = readBuffer.AsSpan(0, readResult.BytesTransferred).ToArray();
-        IReadOnlyList<ReadOnlyMemory<byte>> responses = await _handler.HandleAsync(packet, cancellationToken).ConfigureAwait(false);
-        foreach (ReadOnlyMemory<byte> response in responses)
+        var packet = readBuffer.AsSpan(0, bytesTransferred).ToArray();
+        var responses = await _handler.HandleAsync(packet, cancellationToken).ConfigureAwait(false);
+        foreach (var response in responses)
         {
-            await WritePacketAsync(fileDescriptor, response, cancellationToken).ConfigureAwait(false);
+            await WritePacketAsync(response, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private async Task WriteOutboundPacketsAsync(int fileDescriptor, ChannelReader<ReadOnlyMemory<byte>> packets, CancellationToken cancellationToken)
+    private async Task WriteOutboundPacketsAsync(ChannelReader<ReadOnlyMemory<byte>> packets, CancellationToken cancellationToken)
     {
-        await foreach (ReadOnlyMemory<byte> packet in packets.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+        await foreach (var packet in packets.ReadAllAsync(cancellationToken).ConfigureAwait(false))
         {
-            await WritePacketAsync(fileDescriptor, packet, cancellationToken).ConfigureAwait(false);
+            await WritePacketAsync(packet, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private async ValueTask WritePacketAsync(int fileDescriptor, ReadOnlyMemory<byte> packet, CancellationToken cancellationToken)
+    private async ValueTask WritePacketAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken)
     {
         await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            TunPacketIoResult writeResult = await _tunDevice.WritePacketAsync(fileDescriptor, packet, cancellationToken).ConfigureAwait(false);
-            if (!writeResult.Success)
-            {
-                throw new IOException($"TUN packet write failed with error {writeResult.ErrorNumber}.");
-            }
+            await _tunDevice.WriteAsync(packet, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -129,5 +113,8 @@ public sealed class TunPacketPump(ITunDevice tunDevice, ITunPacketHandler handle
         => cancellationToken.IsCancellationRequested;
 
     private static void IgnoreExpectedCancellation(OperationCanceledException exception)
+        => _ = exception;
+
+    private static void IgnoreExpectedReadFailureAfterCancellation(IOException exception)
         => _ = exception;
 }

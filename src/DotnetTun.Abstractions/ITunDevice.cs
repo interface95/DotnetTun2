@@ -1,12 +1,16 @@
 namespace DotnetTun.Abstractions;
 
-public interface ITunDevice
+public interface ITunDevice : IAsyncDisposable
 {
-    Task<TunDeviceOpenResult> OpenTunAsync(CancellationToken cancellationToken = default);
+    bool IsOpen { get; }
 
-    ValueTask<TunPacketIoResult> ReadPacketAsync(int fileDescriptor, Memory<byte> buffer, CancellationToken cancellationToken = default);
+    string? InterfaceName { get; }
 
-    ValueTask<TunPacketIoResult> WritePacketAsync(int fileDescriptor, ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default);
+    ValueTask OpenAsync(CancellationToken cancellationToken = default);
 
-    ValueTask<TunDeviceCloseResult> CloseTunAsync(int fileDescriptor, CancellationToken cancellationToken = default);
+    ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default);
+
+    ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default);
+
+    ValueTask CloseAsync(CancellationToken cancellationToken = default);
 }

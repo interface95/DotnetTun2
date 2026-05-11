@@ -4,7 +4,7 @@ public sealed record Socks5OutboundOptions
 {
     private static readonly TimeSpan DefaultHandshakeTimeout = TimeSpan.FromSeconds(10);
 
-    public Socks5OutboundOptions(string host, int port, TimeSpan? HandshakeTimeout = null)
+    public Socks5OutboundOptions(string host, int port, TimeSpan? HandshakeTimeout = null, string name = "socks5")
     {
         if (string.IsNullOrWhiteSpace(host))
         {
@@ -18,8 +18,13 @@ public sealed record Socks5OutboundOptions
 
         Host = host.Trim();
         Port = port;
+        Name = string.IsNullOrWhiteSpace(name)
+            ? throw new ArgumentException("SOCKS5 outbound name must not be empty.", nameof(name))
+            : name.Trim();
         this.HandshakeTimeout = ValidateHandshakeTimeout(HandshakeTimeout ?? DefaultHandshakeTimeout);
     }
+
+    public string Name { get; }
 
     public string Host { get; }
 

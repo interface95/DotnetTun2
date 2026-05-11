@@ -1,4 +1,6 @@
 using DotnetTun.Abstractions;
+using DotnetTun.Abstractions.Dns;
+using DotnetTun.Abstractions.Routing;
 using DotnetTun.Core.Dns;
 
 namespace DotnetTun.Core.Sessions;
@@ -14,21 +16,41 @@ public sealed class RawTunProxy(TunPacketPump packetPump, IAsyncDisposable pipel
         IOutbound outbound,
         uint serverInitialSequence,
         int mtu = 1500,
-        TimeSpan? responseReadTimeout = null)
+        TimeSpan? responseReadTimeout = null,
+        IDnsHijacker? dnsHijacker = null)
     {
-        RawTcpTunPipeline pipeline = RawTcpTunPipeline.Create(fakeIpPool, outbound, serverInitialSequence, responseReadTimeout);
-        var packetPump = new TunPacketPump(tunDevice, pipeline.PacketHandler, mtu, pipeline.OutboundPackets);
-        return new RawTunProxy(packetPump, pipeline);
+        var pipeline = RawTcpTunPipeline.Create(fakeIpPool, outbound, serverInitialSequence, responseReadTimeout, dnsHijacker);
+        return Create(tunDevice, pipeline, mtu);
     }
 
-    public ValueTask PumpOnceAsync(int fileDescriptor, CancellationToken cancellationToken = default)
-        => _packetPump.PumpOnceAsync(fileDescriptor, cancellationToken);
+    public static RawTunProxy Create(
+        ITunDevice tunDevice,
+        IFakeIpStore fakeIpStore,
+        IRouter router,
+        IReadOnlyDictionary<string, IOutbound> outbounds,
+        uint serverInitialSequence,
+        int mtu = 1500,
+        TimeSpan? responseReadTimeout = null,
+        IDnsHijacker? dnsHijacker = null)
+    {
+        var pipeline = RawTcpTunPipeline.Create(fakeIpStore, router, outbounds, serverInitialSequence, responseReadTimeout, dnsHijacker);
+        return Create(tunDevice, pipeline, mtu);
+    }
 
-    public Task RunOpenAsync(int fileDescriptor, CancellationToken cancellationToken = default)
-        => _packetPump.RunOpenAsync(fileDescriptor, cancellationToken);
+    public ValueTask PumpOnceAsync(CancellationToken cancellationToken = default)
+        => _packetPump.PumpOnceAsync(cancellationToken);
+
+    public Task RunOpenAsync(CancellationToken cancellationToken = default)
+        => _packetPump.RunOpenAsync(cancellationToken);
 
     public Task RunAsync(CancellationToken cancellationToken = default)
         => _packetPump.RunAsync(cancellationToken);
 
     public ValueTask DisposeAsync() => _pipeline.DisposeAsync();
+
+    private static RawTunProxy Create(ITunDevice tunDevice, RawTcpTunPipeline pipeline, int mtu)
+    {
+        var packetPump = new TunPacketPump(tunDevice, pipeline.PacketHandler, mtu, pipeline.OutboundPackets);
+        return new RawTunProxy(packetPump, pipeline);
+    }
 }

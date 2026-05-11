@@ -9,6 +9,16 @@ namespace DotnetTun.Core.Tests.Outbounds;
 public sealed class Socks5OutboundTests
 {
     [Fact]
+    public void Name_ReflectsOptionsName()
+    {
+        // Arrange
+        IOutbound outbound = new Socks5Outbound(new Socks5OutboundOptions("127.0.0.1", 1080, name: "my-socks"));
+
+        // Act / Assert
+        Assert.Equal("my-socks", outbound.Name);
+    }
+
+    [Fact]
     public async Task ConnectAsync_WhenSocksServerStallsGreeting_ThrowsTimeout()
     {
         // Arrange

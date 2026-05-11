@@ -17,7 +17,8 @@ public sealed class TunPacketPumpTests
         var pump = new TunPacketPump(device, handler, mtu: 8);
 
         // Act
-        await pump.PumpOnceAsync(123, TestContext.Current.CancellationToken);
+        await device.OpenAsync(TestContext.Current.CancellationToken);
+        await pump.PumpOnceAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Equal(packet, handler.ReceivedPacket);
@@ -25,7 +26,6 @@ public sealed class TunPacketPumpTests
             device.WrittenPackets,
             writtenPacket =>
             {
-                Assert.Equal(123, writtenPacket.FileDescriptor);
                 Assert.Equal(response, writtenPacket.Packet);
             });
     }
@@ -45,7 +45,7 @@ public sealed class TunPacketPumpTests
 
         // Assert
         Assert.Equal(packet, handler.ReceivedPacket);
-        Assert.Equal(123, device.ClosedFileDescriptor);
+        Assert.False(device.IsOpen);
     }
 
     [Fact]
@@ -67,9 +67,8 @@ public sealed class TunPacketPumpTests
         await runTask;
 
         // Assert
-        Assert.Equal(123, writtenPacket.FileDescriptor);
         Assert.Equal(outboundPacket, writtenPacket.Packet);
-        Assert.Equal(123, device.ClosedFileDescriptor);
+        Assert.False(device.IsOpen);
     }
 
     [Fact]
@@ -87,7 +86,7 @@ public sealed class TunPacketPumpTests
         await runTask.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
 
         // Assert
-        Assert.Equal(123, device.ClosedFileDescriptor);
+        Assert.False(device.IsOpen);
     }
 
     [Fact]
@@ -116,27 +115,46 @@ public sealed class TunPacketPumpTests
     {
         public List<WrittenPacket> WrittenPackets { get; } = [];
 
-        public int ClosedFileDescriptor { get; private set; } = -1;
+        public bool IsOpen { get; private set; }
 
-        public Task<TunDeviceOpenResult> OpenTunAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult(TunDeviceOpenResult.Opened(123, "tun-test"));
+        public string? InterfaceName { get; private set; }
 
-        public ValueTask<TunPacketIoResult> ReadPacketAsync(int fileDescriptor, Memory<byte> buffer, CancellationToken cancellationToken = default)
+        public ValueTask OpenAsync(CancellationToken cancellationToken = default)
         {
+            IsOpen = true;
+            InterfaceName = "tun-test";
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            EnsureOpen();
             packet.CopyTo(buffer);
-            return ValueTask.FromResult(TunPacketIoResult.Transferred(packet.Length));
+            return ValueTask.FromResult(packet.Length);
         }
 
-        public ValueTask<TunPacketIoResult> WritePacketAsync(int fileDescriptor, ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
+        public ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
         {
-            WrittenPackets.Add(new WrittenPacket(fileDescriptor, packet.ToArray()));
-            return ValueTask.FromResult(TunPacketIoResult.Transferred(packet.Length));
+            EnsureOpen();
+            WrittenPackets.Add(new WrittenPacket(packet.ToArray()));
+            return ValueTask.CompletedTask;
         }
 
-        public ValueTask<TunDeviceCloseResult> CloseTunAsync(int fileDescriptor, CancellationToken cancellationToken = default)
+        public ValueTask CloseAsync(CancellationToken cancellationToken = default)
         {
-            ClosedFileDescriptor = fileDescriptor;
-            return ValueTask.FromResult(TunDeviceCloseResult.Closed());
+            IsOpen = false;
+            InterfaceName = null;
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync() => CloseAsync();
+
+        private void EnsureOpen()
+        {
+            if (!IsOpen)
+            {
+                throw new InvalidOperationException("TUN device is not open.");
+            }
         }
     }
 
@@ -171,37 +189,56 @@ public sealed class TunPacketPumpTests
 
         public TaskCompletionSource ReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public int ClosedFileDescriptor { get; private set; } = -1;
+        public bool IsOpen { get; private set; }
 
-        public Task<TunDeviceOpenResult> OpenTunAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult(TunDeviceOpenResult.Opened(123, "tun-test"));
+        public string? InterfaceName { get; private set; }
 
-        public ValueTask<TunPacketIoResult> ReadPacketAsync(int fileDescriptor, Memory<byte> buffer, CancellationToken cancellationToken = default)
+        public ValueTask OpenAsync(CancellationToken cancellationToken = default)
         {
+            IsOpen = true;
+            InterfaceName = "tun-test";
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            EnsureOpen();
             ReadStarted.TrySetResult();
-            return new ValueTask<TunPacketIoResult>(WaitForCancellationAsync(cancellationToken));
+            return new ValueTask<int>(WaitForCancellationAsync(cancellationToken));
         }
 
-        public ValueTask<TunPacketIoResult> WritePacketAsync(int fileDescriptor, ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
+        public ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
         {
-            var writtenPacket = new WrittenPacket(fileDescriptor, packet.ToArray());
+            EnsureOpen();
+            var writtenPacket = new WrittenPacket(packet.ToArray());
             _writtenPacket.TrySetResult(writtenPacket);
-            return ValueTask.FromResult(TunPacketIoResult.Transferred(packet.Length));
+            return ValueTask.CompletedTask;
         }
 
-        public ValueTask<TunDeviceCloseResult> CloseTunAsync(int fileDescriptor, CancellationToken cancellationToken = default)
+        public ValueTask CloseAsync(CancellationToken cancellationToken = default)
         {
-            ClosedFileDescriptor = fileDescriptor;
-            return ValueTask.FromResult(TunDeviceCloseResult.Closed());
+            IsOpen = false;
+            InterfaceName = null;
+            return ValueTask.CompletedTask;
         }
 
         public Task<WrittenPacket> NextWrittenPacketAsync(CancellationToken cancellationToken)
             => _writtenPacket.Task.WaitAsync(cancellationToken);
 
-        private static async Task<TunPacketIoResult> WaitForCancellationAsync(CancellationToken cancellationToken)
+        public ValueTask DisposeAsync() => CloseAsync();
+
+        private static async Task<int> WaitForCancellationAsync(CancellationToken cancellationToken)
         {
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
-            return TunPacketIoResult.Transferred(0);
+            return 0;
+        }
+
+        private void EnsureOpen()
+        {
+            if (!IsOpen)
+            {
+                throw new InvalidOperationException("TUN device is not open.");
+            }
         }
     }
 
@@ -209,13 +246,20 @@ public sealed class TunPacketPumpTests
     {
         public TaskCompletionSource ReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public int ClosedFileDescriptor { get; private set; } = -1;
+        public bool IsOpen { get; private set; }
 
-        public Task<TunDeviceOpenResult> OpenTunAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult(TunDeviceOpenResult.Opened(123, "tun-test"));
+        public string? InterfaceName { get; private set; }
 
-        public async ValueTask<TunPacketIoResult> ReadPacketAsync(int fileDescriptor, Memory<byte> buffer, CancellationToken cancellationToken = default)
+        public ValueTask OpenAsync(CancellationToken cancellationToken = default)
         {
+            IsOpen = true;
+            InterfaceName = "tun-test";
+            return ValueTask.CompletedTask;
+        }
+
+        public async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            EnsureOpen();
             ReadStarted.TrySetResult();
             try
             {
@@ -223,21 +267,35 @@ public sealed class TunPacketPumpTests
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                return TunPacketIoResult.Failed(89);
+                throw new IOException("TUN packet read failed with error 89.");
             }
 
-            return TunPacketIoResult.Transferred(0);
+            return 0;
         }
 
-        public ValueTask<TunPacketIoResult> WritePacketAsync(int fileDescriptor, ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
-            => ValueTask.FromResult(TunPacketIoResult.Transferred(packet.Length));
-
-        public ValueTask<TunDeviceCloseResult> CloseTunAsync(int fileDescriptor, CancellationToken cancellationToken = default)
+        public ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
         {
-            ClosedFileDescriptor = fileDescriptor;
-            return ValueTask.FromResult(TunDeviceCloseResult.Closed());
+            EnsureOpen();
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask CloseAsync(CancellationToken cancellationToken = default)
+        {
+            IsOpen = false;
+            InterfaceName = null;
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync() => CloseAsync();
+
+        private void EnsureOpen()
+        {
+            if (!IsOpen)
+            {
+                throw new InvalidOperationException("TUN device is not open.");
+            }
         }
     }
 
-    private sealed record WrittenPacket(int FileDescriptor, byte[] Packet);
+    private sealed record WrittenPacket(byte[] Packet);
 }

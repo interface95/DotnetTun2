@@ -41,6 +41,8 @@ public sealed class TransparentProxyServiceCollectionExtensionsTests
 
     private sealed class TestOutbound : IOutbound
     {
+        public string Name => "test";
+
         public string Endpoint { get; set; } = string.Empty;
 
         public ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
