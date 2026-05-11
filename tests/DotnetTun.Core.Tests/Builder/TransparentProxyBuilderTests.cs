@@ -34,6 +34,8 @@ public sealed class TransparentProxyBuilderTests
 
     private sealed record TestOutbound(string Endpoint) : IOutbound
     {
+        public string Name => "test";
+
         public ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
             => throw new NotSupportedException("Test outbound is configuration-only.");
     }

@@ -1,7 +1,6 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 
 namespace DotnetTun.Core.Dns;
 
@@ -12,25 +11,27 @@ public static class FakeDnsMessage
 
     public static bool TryReadQuestion(ReadOnlySpan<byte> packet, out DnsQuestion question)
     {
-        question = new DnsQuestion(0, string.Empty, DnsRecordType.A, []);
+        question = null!;
 
         if (packet.Length < HeaderLength)
         {
             return false;
         }
 
-        ushort transactionId = BinaryPrimitives.ReadUInt16BigEndian(packet[..2]);
-        ushort questionCount = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(4, 2));
+        var transactionId = BinaryPrimitives.ReadUInt16BigEndian(packet[..2]);
+        var questionCount = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(4, 2));
         if (questionCount != 1)
         {
             return false;
         }
 
-        int offset = HeaderLength;
-        List<string> labels = [];
+        var offset = HeaderLength;
+        Span<char> domainBuffer = stackalloc char[255];
+        var domainLength = 0;
+        var labelCount = 0;
         while (offset < packet.Length)
         {
-            byte labelLength = packet[offset++];
+            var labelLength = packet[offset++];
             if (labelLength == 0)
             {
                 break;
@@ -41,25 +42,48 @@ public static class FakeDnsMessage
                 return false;
             }
 
-            labels.Add(Encoding.ASCII.GetString(packet.Slice(offset, labelLength)));
+            if (domainLength != 0)
+            {
+                if (domainLength >= domainBuffer.Length)
+                {
+                    return false;
+                }
+
+                domainBuffer[domainLength++] = '.';
+            }
+
+            if (domainLength + labelLength > domainBuffer.Length)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < labelLength; i++)
+            {
+                var value = packet[offset + i];
+                domainBuffer[domainLength++] = value is >= (byte)'A' and <= (byte)'Z'
+                    ? (char)(value + 32)
+                    : (char)value;
+            }
+
+            labelCount++;
             offset += labelLength;
         }
 
-        if (labels.Count == 0 || offset + 4 > packet.Length)
+        if (labelCount == 0 || offset + 4 > packet.Length)
         {
             return false;
         }
 
-        ushort type = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(offset, 2));
-        ushort dnsClass = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(offset + 2, 2));
+        var type = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(offset, 2));
+        var dnsClass = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(offset + 2, 2));
         if (dnsClass != DnsClassInternet || !Enum.IsDefined(typeof(DnsRecordType), type))
         {
             return false;
         }
 
-        int questionLength = offset + 4 - HeaderLength;
-        byte[] originalQuestion = packet.Slice(HeaderLength, questionLength).ToArray();
-        question = new DnsQuestion(transactionId, string.Join('.', labels).ToLowerInvariant(), (DnsRecordType)type, originalQuestion);
+        var questionLength = offset + 4 - HeaderLength;
+        var originalQuestion = packet.Slice(HeaderLength, questionLength).ToArray();
+        question = new DnsQuestion(transactionId, new string(domainBuffer[..domainLength]), (DnsRecordType)type, originalQuestion);
         return true;
     }
 
@@ -75,7 +99,7 @@ public static class FakeDnsMessage
             throw new ArgumentException("A responses require an IPv4 address.", nameof(fakeIp));
         }
 
-        byte[] response = new byte[HeaderLength + question.OriginalQuestion.Length + 16];
+        var response = new byte[HeaderLength + question.OriginalQuestion.Length + 16];
         BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(0, 2), question.TransactionId);
         response[2] = 0x81;
         response[3] = 0x80;
@@ -85,7 +109,7 @@ public static class FakeDnsMessage
         response[7] = 0x01;
 
         question.OriginalQuestion.CopyTo(response.AsSpan(HeaderLength));
-        int answerOffset = HeaderLength + question.OriginalQuestion.Length;
+        var answerOffset = HeaderLength + question.OriginalQuestion.Length;
 
         response[answerOffset] = 0xC0;
         response[answerOffset + 1] = 0x0C;
@@ -93,14 +117,17 @@ public static class FakeDnsMessage
         BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(answerOffset + 4, 2), DnsClassInternet);
         BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(answerOffset + 6, 4), (uint)ttlSeconds);
         BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(answerOffset + 10, 2), 4);
-        fakeIp.GetAddressBytes().CopyTo(response.AsSpan(answerOffset + 12, 4));
+        if (!fakeIp.TryWriteBytes(response.AsSpan(answerOffset + 12, 4), out var bytesWritten) || bytesWritten != 4)
+        {
+            throw new ArgumentException("A responses require an IPv4 address.", nameof(fakeIp));
+        }
 
         return response;
     }
 
     public static byte[] CreateNoDataResponse(DnsQuestion question)
     {
-        byte[] response = new byte[HeaderLength + question.OriginalQuestion.Length];
+        var response = new byte[HeaderLength + question.OriginalQuestion.Length];
         BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(0, 2), question.TransactionId);
         response[2] = 0x81;
         response[3] = 0x80;
